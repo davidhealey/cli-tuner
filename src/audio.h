@@ -48,6 +48,7 @@ bool save_audio(const std::string& path,
 double detect_overall_pitch(const std::vector<float>& samples,
                             int       channels,
                             int       sample_rate,
+                            double    target_freq,
                             float     yin_threshold);
 
 // Compute per-segment drift corrections to retune audio toward target_freq.

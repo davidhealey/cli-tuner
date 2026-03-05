@@ -141,7 +141,7 @@ int main(int argc, char* argv[])
     std::vector<SegmentCorrection> corrections;
 
     if (mode == "shift") {
-        double detected = detect_overall_pitch(ref_samples, ref_ch, ref_sr, yin_threshold);
+        double detected = detect_overall_pitch(ref_samples, ref_ch, ref_sr, target_freq, yin_threshold);
         if (detected <= 0.0) {
             std::cerr << "Error: could not detect pitch in '"
                       << input_files[0] << "'\n";

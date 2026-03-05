@@ -25,6 +25,16 @@ static int yin_window_for_rate(int sample_rate)
     return half * 2;
 }
 
+// Snap freq to the octave of reference_freq that is closest.
+// Corrects YIN octave errors when the expected pitch is known.
+// e.g. snap_to_octave(880, 440) == 440, snap_to_octave(220, 440) == 440
+static double snap_to_octave(double freq, double reference_freq)
+{
+    if (freq <= 0.0 || reference_freq <= 0.0) return freq;
+    double octaves = std::log2(freq / reference_freq);
+    return freq / std::pow(2.0, std::round(octaves));
+}
+
 // Extract first channel from interleaved buffer.
 static std::vector<float> to_mono(const std::vector<float>& interleaved,
                                    int channels, long long frames)
@@ -144,6 +154,7 @@ bool save_audio(const std::string& path,
 double detect_overall_pitch(const std::vector<float>& samples,
                             int       channels,
                             int       sample_rate,
+                            double    target_freq,
                             float     yin_threshold)
 {
     long long total_frames = static_cast<long long>(samples.size()) / channels;
@@ -167,7 +178,8 @@ double detect_overall_pitch(const std::vector<float>& samples,
             float conf = 0.0f;
             float f = yin.detect(mono.data() + pos, win, &conf);
             if (f > 15.0f && f < 22000.0f && conf >= conf_threshold)
-                freqs.push_back(f);
+                freqs.push_back(static_cast<float>(
+                    snap_to_octave(static_cast<double>(f), target_freq)));
         }
         return freqs;
     };
@@ -213,7 +225,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
         float conf = 0.0f;
         float f = yin.detect(mono.data() + start, static_cast<int>(len), &conf);
         if (f > 15.0f && f < 22000.0f && conf > 0.4f)
-            raw[static_cast<size_t>(s)] = static_cast<double>(f);
+            raw[static_cast<size_t>(s)] = snap_to_octave(static_cast<double>(f), target_freq);
     }
 
     // --- Interpolate missing estimates ---
