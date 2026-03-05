@@ -308,6 +308,12 @@ std::vector<float> apply_corrections(const std::vector<float>& samples,
     std::vector<float> output;
     output.reserve(static_cast<size_t>(est * channels));
 
+    // Track how many input frames were actually consumed. Using c.input_frames
+    // directly would be wrong when a secondary file has a different sample rate
+    // than the reference: in_len is clipped to the actual file length inside
+    // the loop, so we must derive covered from that, not from the nominal value.
+    long long covered = 0;
+
     for (const auto& c : corrections) {
         if (c.input_offset >= total_input) break;
 
@@ -316,6 +322,8 @@ std::vector<float> apply_corrections(const std::vector<float>& samples,
             in_len = total_input - c.input_offset;
         if (in_len <= 0) continue;
 
+        covered = c.input_offset + in_len; // actual frames consumed
+
         const float* ptr = samples.data() +
                            static_cast<size_t>(c.input_offset * channels);
 
@@ -323,11 +331,8 @@ std::vector<float> apply_corrections(const std::vector<float>& samples,
         output.insert(output.end(), seg.begin(), seg.end());
     }
 
-    // If the input file is longer than what the corrections cover, append the
-    // remainder unchanged (shouldn't happen in normal usage but safe to handle).
-    long long covered = 0;
-    for (const auto& c : corrections)
-        covered = std::max(covered, c.input_offset + c.input_frames);
+    // Append any frames beyond what the corrections covered (can happen in
+    // drift mode when a secondary file is longer than the reference file).
     if (covered < total_input) {
         const float* tail = samples.data() + static_cast<size_t>(covered * channels);
         long long tail_len = (total_input - covered) * channels;
