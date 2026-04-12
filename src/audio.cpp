@@ -186,15 +186,6 @@ double detect_overall_pitch(const std::vector<float>& samples,
 
     uint_t hop = win / 2;
 
-    // Skip the first 5% of frames to avoid attack transients, but run the
-    // detector from pos=0 so its internal autocorrelation buffer is fully
-    // populated before we start counting results.  The end-of-file tail skip
-    // is intentionally omitted: the median is robust to a handful of release
-    // detections, and for very short samples (staccatissimo < 0.5 s) the end
-    // skip would discard hops we can't afford to lose.
-    long long skip           = total_frames / 20;
-    long long analysis_start = skip;
-
     // aubio_pitch_get_confidence() returns 0.0 for "yinfft" in many aubio builds,
     // so we use a cents gate (after octave snapping) as the quality filter.
     // The tolerance controls the YIN aperiodicity threshold — lower is stricter
@@ -204,6 +195,21 @@ double detect_overall_pitch(const std::vector<float>& samples,
     //             Octave errors (1200 cents) are rejected even before the gate by
     //             snap_to_octave(), so 200 cents is enough for normally-tuned samples
     //             while still rejecting spurious off-frequency detections.
+    //
+    // attack_skip: For long files (> 0.5 s) we skip the first 5% of frames to
+    //   suppress attack transients.  For staccatissimo files the note body may be
+    //   shorter than one hop, so we skip nothing and count from pos=0.
+    //
+    // Cold-buffer warmup: aubio's internal YIN window is half-zero on the very
+    //   first call.  We pre-warm by feeding the first hop of real audio once before
+    //   the main loop.  The main loop then starts at pos=0; at that point the
+    //   internal buffer contains [firstHop, firstHop] — duplicated, but periodic,
+    //   so YIN can still detect the fundamental.  For longer files the attack skip
+    //   means pos=0 is discarded anyway, and the warm state carries forward.
+    long long attack_skip = (total_frames > static_cast<long long>(sample_rate / 2))
+                            ? total_frames / 20  // 5% for files > 0.5 s
+                            : 0;                  // no skip for staccatissimo
+
     auto collect = [&](float tol, double gate_cents) {
         aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
                                              static_cast<uint_t>(sample_rate));
@@ -213,6 +219,14 @@ double detect_overall_pitch(const std::vector<float>& samples,
 
         fvec_t* ibuf = new_fvec(hop);
         fvec_t* obuf = new_fvec(1);
+
+        // Pre-warm: feed first hop once so the YIN window is populated with
+        // real signal rather than zeros when pos=0 is counted.
+        if (static_cast<long long>(hop) <= total_frames) {
+            for (uint_t i = 0; i < hop; ++i)
+                ibuf->data[i] = mono[static_cast<size_t>(i)];
+            aubio_pitch_do(pd, ibuf, obuf); // warm-up only, result ignored
+        }
 
         std::vector<float> freqs;
         for (long long pos = 0;
@@ -224,7 +238,7 @@ double detect_overall_pitch(const std::vector<float>& samples,
 
             aubio_pitch_do(pd, ibuf, obuf);
 
-            if (pos < analysis_start) continue; // attack warmup, discard
+            if (pos < attack_skip) continue; // attack-transient skip (long files only)
 
             float f = obuf->data[0];
 
