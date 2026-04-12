@@ -167,65 +167,52 @@ double detect_overall_pitch(const std::vector<float>& samples,
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
 
-    uint_t win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
-    uint_t hop = win / 2;
-
-    // aubio_pitch_get_confidence() returns 0.0 for "yinfft" in many aubio builds,
-    // so we use a cents gate (after octave snapping) as the quality filter.
-    // The tolerance controls the YIN aperiodicity threshold — lower is stricter
-    // and will return 0 Hz for breathy/noisy frames.  We try progressively more
-    // permissive settings so that vocal whistles, breathy flutes, etc. still work.
-    // gate_cents: radius around target (post-octave-snap); 200 cents = 2 semitones.
-    //             Octave errors (1200 cents) are rejected even before the gate by
-    //             snap_to_octave(), so 200 cents is enough for normally-tuned samples
-    //             while still rejecting spurious off-frequency detections.
-    //
-    // attack_skip: For long files (> 0.5 s) we skip the first 5% of frames to
-    //   suppress attack transients.  For staccatissimo files the note body may be
-    //   shorter than one hop, so we skip nothing and count from pos=0.
-    //
-    // Cold-buffer warmup: aubio's internal YIN window is half-zero on the very
-    //   first call.  We pre-warm by feeding the first hop of real audio once before
-    //   the main loop.  The main loop then starts at pos=0; at that point the
-    //   internal buffer contains [firstHop, firstHop] — duplicated, but periodic,
-    //   so YIN can still detect the fundamental.  For longer files the attack skip
-    //   means pos=0 is discarded anyway, and the warm state carries forward.
+    // For long files (> 0.5 s) skip the first 5% of frames to suppress attack
+    // transients.  For staccatissimo files count from pos=0 — the note body may
+    // be shorter than one hop so we can't afford to discard any.
     long long attack_skip = (total_frames > static_cast<long long>(sample_rate / 2))
-                            ? total_frames / 20  // 5% for files > 0.5 s
-                            : 0;                  // no skip for staccatissimo
+                            ? total_frames / 20
+                            : 0;
 
-    auto collect = [&](float tol, double gate_cents) {
-        aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
+    // collect(): run aubio yinfft with a given window/hop size, tolerance, and
+    // cents gate.  Returns all accepted per-hop frequencies (empty = failure).
+    //
+    // Pre-warm: the first aubio call always has a half-zero internal buffer
+    // (cold-buffer problem).  We feed the first hop of real audio once before
+    // the main loop so that the pos=0 result is based on a fully populated
+    // window.  The duplicated signal [firstHop, firstHop] retains periodicity.
+    //
+    // Silence gate is set to -96 dBFS (generous) so that short note bodies
+    // diluted into a long hop by surrounding silence are not suppressed.
+    // Aperiodic noise at that level is still rejected by the tolerance gate.
+    auto collect = [&](float tol, double gate_cents, uint_t w, uint_t h) {
+        aubio_pitch_t* pd = new_aubio_pitch("yinfft", w, h,
                                              static_cast<uint_t>(sample_rate));
         aubio_pitch_set_unit(pd, "Hz");
         aubio_pitch_set_tolerance(pd, tol);
-        aubio_pitch_set_silence(pd, -80.f);
+        aubio_pitch_set_silence(pd, -96.f);
 
-        fvec_t* ibuf = new_fvec(hop);
+        fvec_t* ibuf = new_fvec(h);
         fvec_t* obuf = new_fvec(1);
 
-        // Pre-warm: feed first hop once so the YIN window is populated with
-        // real signal rather than zeros when pos=0 is counted.
-        if (static_cast<long long>(hop) <= total_frames) {
-            for (uint_t i = 0; i < hop; ++i)
+        if (static_cast<long long>(h) <= total_frames) {
+            for (uint_t i = 0; i < h; ++i)
                 ibuf->data[i] = mono[static_cast<size_t>(i)];
-            aubio_pitch_do(pd, ibuf, obuf); // warm-up only, result ignored
+            aubio_pitch_do(pd, ibuf, obuf); // pre-warm, result ignored
         }
 
         std::vector<float> freqs;
         for (long long pos = 0;
-             pos + static_cast<long long>(hop) <= total_frames;
-             pos += static_cast<long long>(hop))
+             pos + static_cast<long long>(h) <= total_frames;
+             pos += static_cast<long long>(h))
         {
-            for (uint_t i = 0; i < hop; ++i)
+            for (uint_t i = 0; i < h; ++i)
                 ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
-
             aubio_pitch_do(pd, ibuf, obuf);
 
-            if (pos < attack_skip) continue; // attack-transient skip (long files only)
+            if (pos < attack_skip) continue;
 
             float f = obuf->data[0];
-
             if (f > 15.f && f < 22000.f) {
                 double snapped = snap_to_octave(static_cast<double>(f), target_freq);
                 double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
@@ -240,10 +227,35 @@ double detect_overall_pitch(const std::vector<float>& samples,
         return freqs;
     };
 
-    // Pass 1: user-supplied tolerance, ±400-cent gate (4 semitones).
-    std::vector<float> freqs = collect(yin_threshold, 200.0);
-    // Pass 2: relax tolerance for breathy/complex timbres (e.g. vocal whistles).
-    if (freqs.empty()) freqs = collect(std::min(yin_threshold * 2.0f, 0.5f), 200.0);
+    // Multi-window strategy: try window sizes from large to small.
+    //
+    // Large windows (5120 frames = 106 ms at 48 kHz) average over more
+    // periods and are robust for long, sustaining notes.
+    //
+    // Short staccatissimo notes (< 20 ms body) can be completely diluted
+    // inside a large hop: surrounding silence drives aperiodicity above the
+    // tolerance threshold so YIN returns 0 Hz for every hop.  Smaller windows
+    // (down to 512 frames = 10.7 ms) reduce the dilution so the hop containing
+    // the note body is almost purely tonal → YIN detects it reliably.
+    //
+    // We stop at the first window size that produces at least one valid reading,
+    // so long notes keep using the large window and short notes fall through to
+    // a smaller one without any configuration needed.
+    const uint_t default_win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
+    const uint_t win_sizes[] = { default_win, 2048u, 1024u, 512u };
+
+    std::vector<float> freqs;
+    for (uint_t w : win_sizes) {
+        if (w > default_win) continue;                        // never go larger than default
+        if (static_cast<long long>(w) > total_frames * 2) continue; // too big for this file
+
+        uint_t h = w / 2;
+        freqs = collect(yin_threshold, 200.0, w, h);
+        if (!freqs.empty()) break;
+
+        freqs = collect(std::min(yin_threshold * 2.0f, 0.5f), 200.0, w, h);
+        if (!freqs.empty()) break;
+    }
 
     if (freqs.empty()) return 0.0;
 
