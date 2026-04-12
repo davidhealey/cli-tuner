@@ -360,6 +360,15 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     }
 
     // --- Build SegmentCorrection list ---
+    // Per-segment corrections are only applied when the segment's smoothed pitch
+    // deviates from global_freq by more than kMinDriftCents.  Below that threshold
+    // the deviation is indistinguishable from detection noise (~8-10 cents RMS
+    // after the 7-point smoother), and applying it would make the output less
+    // accurate than the input.  Those segments instead receive only the global
+    // correction (global_freq → target_freq), which is computed from the robust
+    // median and is always safe to apply.
+    const double kMinDriftCents = 20.0;
+
     std::vector<SegmentCorrection> corrections;
     corrections.reserve(static_cast<size_t>(num_segs));
 
@@ -369,6 +378,12 @@ std::vector<SegmentCorrection> compute_drift_corrections(
 
         double detected = smooth[static_cast<size_t>(s)];
         if (detected < 1.0) detected = global_freq; // safety
+
+        // If the per-segment deviation from the global pitch is below the noise
+        // floor, use global_freq so only the overall pitch shift is applied.
+        double dev_from_global = std::abs(1200.0 * std::log2(detected / global_freq));
+        if (dev_from_global < kMinDriftCents)
+            detected = global_freq;
 
         double ratio = detected / target_freq;
         // Clamp to ±6 semitones (factor ~0.707–1.414) to avoid extreme artefacts
