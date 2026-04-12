@@ -25,6 +25,10 @@ static void print_usage(const char* prog)
         << "  -a          Analyse the first input file and print per-segment pitch\n"
         << "              detection details.  No output files are written.\n"
         << "              Useful for diagnosing detection quality.\n"
+        << "  -c <cents>  Minimum correction threshold in cents (default: 5).\n"
+        << "              Files detected within this many cents of target are\n"
+        << "              copied unchanged rather than corrected.  Use 0 to\n"
+        << "              always attempt correction.\n"
         << "  -t <val>    YIN confidence threshold (default: 0.15, range 0.05–0.30)\n"
         << "              Lower values are stricter (fewer false positives).\n"
         << "  -h          Show this help\n\n"
@@ -51,14 +55,15 @@ static double freq_to_semitones(double from_hz, double to_hz)
 
 int main(int argc, char* argv[])
 {
-    int         midi_note     = -1;
+    int         midi_note          = -1;
     std::string output_dir;
-    std::string mode          = "shift";
-    float       yin_threshold = 0.15f;
-    bool        analyze_mode  = false;
+    std::string mode               = "shift";
+    float       yin_threshold      = 0.15f;
+    double      min_correction_cents = 5.0;
+    bool        analyze_mode       = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:o:m:t:ah")) != -1) {
+    while ((opt = getopt(argc, argv, "n:o:m:t:c:ah")) != -1) {
         switch (opt) {
             case 'n':
                 try { midi_note = std::stoi(optarg); }
@@ -73,6 +78,13 @@ int main(int argc, char* argv[])
                 try { yin_threshold = std::stof(optarg); }
                 catch (...) {
                     std::cerr << "Error: invalid threshold '" << optarg << "'\n";
+                    return 1;
+                }
+                break;
+            case 'c':
+                try { min_correction_cents = std::stod(optarg); }
+                catch (...) {
+                    std::cerr << "Error: invalid cents value '" << optarg << "'\n";
                     return 1;
                 }
                 break;
@@ -161,8 +173,7 @@ int main(int argc, char* argv[])
 
     // Below this threshold the detected deviation is within the pitch-detection
     // noise floor; applying the correction risks making the output less accurate
-    // than the original.  Files within this range are passed through unchanged.
-    static constexpr double kMinCorrectionCents = 15.0;
+    // than the original.  Files within this range are copied unchanged.
 
     // --- Compute corrections from the reference file ---
     std::vector<SegmentCorrection> corrections;
@@ -214,8 +225,8 @@ int main(int argc, char* argv[])
     // the detection uncertainty is comparable to the deviation itself and
     // correcting could make the output worse than the input.
     double global_cents = std::abs(1200.0 * std::log2(detected_global / target_freq));
-    if (global_cents < kMinCorrectionCents) {
-        std::cout << "  Within " << kMinCorrectionCents
+    if (min_correction_cents > 0.0 && global_cents < min_correction_cents) {
+        std::cout << "  Within " << min_correction_cents
                   << "-cent threshold (" << global_cents
                   << " cents) – already in tune, copying originals.\n\n";
 
