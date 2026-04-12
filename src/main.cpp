@@ -217,8 +217,30 @@ int main(int argc, char* argv[])
     if (global_cents < kMinCorrectionCents) {
         std::cout << "  Within " << kMinCorrectionCents
                   << "-cent threshold (" << global_cents
-                  << " cents) – already in tune, skipping correction.\n\n";
-        return 0;
+                  << " cents) – already in tune, copying originals.\n\n";
+
+        int errors = 0;
+        for (const auto& in_path : input_files) {
+            std::string out_path = output_dir + "/" +
+                                   std::filesystem::path(in_path).filename().string();
+            std::error_code ec;
+            if (std::filesystem::equivalent(in_path, out_path, ec)) {
+                std::cerr << "Error: input and output paths are the same for '"
+                          << in_path << "' – choose a different output directory\n";
+                ++errors;
+                continue;
+            }
+            std::cout << "Copying : " << out_path << "\n";
+            std::filesystem::copy_file(in_path, out_path,
+                std::filesystem::copy_options::overwrite_existing, ec);
+            if (ec) {
+                std::cerr << "Error copying '" << in_path << "': "
+                          << ec.message() << "\n";
+                ++errors;
+            }
+        }
+        std::cout << "\nDone" << (errors ? " (with errors)" : "") << ".\n";
+        return errors ? 1 : 0;
     }
 
     std::cout << "\n";
