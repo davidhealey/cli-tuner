@@ -212,37 +212,24 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     std::vector<float> mono = to_mono(samples, channels, total_frames);
 
     int win = yin_window_for_rate(sample_rate);
-    // Correction segments are 4× the YIN window (~460 ms at 44.1 kHz).
-    // Larger segments mean each one spans several vibrato cycles, so the
-    // median of multiple YIN analyses within it reflects the centre pitch
-    // rather than an instantaneous vibrato excursion.
-    int seg = win * 4;
-    int hop = win / 2; // hop between analyses within a segment
+    int seg = win; // one correction segment per YIN window (~106 ms at 48 kHz)
     YIN yin(sample_rate, win, yin_threshold);
 
     long long num_segs = (total_frames + seg - 1) / seg;
 
     // --- Collect raw frequency estimates per segment ---
-    // Run YIN at every hop position inside the segment and take the median.
     std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
     for (long long s = 0; s < num_segs; ++s) {
-        long long seg_start = s * seg;
-        long long seg_end   = std::min(seg_start + static_cast<long long>(seg), total_frames);
+        long long start = s * seg;
+        long long len   = std::min(static_cast<long long>(seg), total_frames - start);
+        if (len < win) continue;
 
-        std::vector<double> seg_pitches;
-        for (long long pos = seg_start; pos + win <= seg_end; pos += hop) {
-            float conf = 0.0f;
-            float f = yin.detect(mono.data() + pos, win, &conf);
-            if (f > 15.0f && f < 22000.0f && conf > 0.4f) {
-                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
-                if (std::abs(1200.0 * std::log2(snapped / target_freq)) <= 200.0)
-                    seg_pitches.push_back(snapped);
-            }
-        }
-
-        if (!seg_pitches.empty()) {
-            std::sort(seg_pitches.begin(), seg_pitches.end());
-            raw[static_cast<size_t>(s)] = seg_pitches[seg_pitches.size() / 2];
+        float conf = 0.0f;
+        float f = yin.detect(mono.data() + start, win, &conf);
+        if (f > 15.0f && f < 22000.0f && conf > 0.4f) {
+            double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+            if (std::abs(1200.0 * std::log2(snapped / target_freq)) <= 200.0)
+                raw[static_cast<size_t>(s)] = snapped;
         }
     }
 
@@ -283,8 +270,10 @@ std::vector<SegmentCorrection> compute_drift_corrections(
         }
     }
 
-    // --- Smooth with a 5-point moving average to remove detection jitter ---
-    const int R = 2; // radius
+    // --- Smooth with a 7-point moving average ---
+    // At 48 kHz the window spans ~742 ms, covering ~4 vibrato cycles at 6 Hz,
+    // which averages out vibrato while still tracking slow intonation drift.
+    const int R = 3; // radius
     std::vector<double> smooth(static_cast<size_t>(num_segs));
     for (long long s = 0; s < num_segs; ++s) {
         long long lo = std::max(0LL, s - R);
