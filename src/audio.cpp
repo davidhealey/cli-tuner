@@ -172,43 +172,52 @@ double detect_overall_pitch(const std::vector<float>& samples,
     long long analysis_start = skip;
     long long analysis_end   = total_frames - skip;
 
-    // Note: aubio_pitch_get_confidence() returns 0.0 for the "yinfft" method in
-    // many aubio builds even when detection is perfect.  We therefore rely on
-    // the 200-cent gate around the known target frequency as our quality filter
-    // instead of confidence.  The tolerance parameter still influences the
-    // internal YIN aperiodicity threshold and thus which frames aubio considers
-    // voiced at all (non-zero output).
-    aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
-                                         static_cast<uint_t>(sample_rate));
-    aubio_pitch_set_unit(pd, "Hz");
-    aubio_pitch_set_tolerance(pd, yin_threshold);
-    aubio_pitch_set_silence(pd, -80.f);
+    // aubio_pitch_get_confidence() returns 0.0 for "yinfft" in many aubio builds,
+    // so we use a cents gate (after octave snapping) as the quality filter.
+    // The tolerance controls the YIN aperiodicity threshold — lower is stricter
+    // and will return 0 Hz for breathy/noisy frames.  We try progressively more
+    // permissive settings so that vocal whistles, breathy flutes, etc. still work.
+    // gate_cents: radius around target (post-octave-snap); 400 cents = 4 semitones,
+    //             well below the 1200-cent octave so octave errors are still rejected.
+    auto collect = [&](float tol, double gate_cents) {
+        aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
+                                             static_cast<uint_t>(sample_rate));
+        aubio_pitch_set_unit(pd, "Hz");
+        aubio_pitch_set_tolerance(pd, tol);
+        aubio_pitch_set_silence(pd, -80.f);
 
-    fvec_t* ibuf = new_fvec(hop);
-    fvec_t* obuf = new_fvec(1);
+        fvec_t* ibuf = new_fvec(hop);
+        fvec_t* obuf = new_fvec(1);
 
-    std::vector<float> freqs;
-    for (long long pos = analysis_start;
-         pos + static_cast<long long>(hop) <= analysis_end;
-         pos += static_cast<long long>(hop))
-    {
-        for (uint_t i = 0; i < hop; ++i)
-            ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
+        std::vector<float> freqs;
+        for (long long pos = analysis_start;
+             pos + static_cast<long long>(hop) <= analysis_end;
+             pos += static_cast<long long>(hop))
+        {
+            for (uint_t i = 0; i < hop; ++i)
+                ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
 
-        aubio_pitch_do(pd, ibuf, obuf);
-        float f = obuf->data[0];
+            aubio_pitch_do(pd, ibuf, obuf);
+            float f = obuf->data[0];
 
-        if (f > 15.f && f < 22000.f) {
-            double snapped = snap_to_octave(static_cast<double>(f), target_freq);
-            double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
-            if (cents <= 200.0)
-                freqs.push_back(static_cast<float>(snapped));
+            if (f > 15.f && f < 22000.f) {
+                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+                double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
+                if (cents <= gate_cents)
+                    freqs.push_back(static_cast<float>(snapped));
+            }
         }
-    }
 
-    del_fvec(ibuf);
-    del_fvec(obuf);
-    del_aubio_pitch(pd);
+        del_fvec(ibuf);
+        del_fvec(obuf);
+        del_aubio_pitch(pd);
+        return freqs;
+    };
+
+    // Pass 1: user-supplied tolerance, ±400-cent gate (4 semitones).
+    std::vector<float> freqs = collect(yin_threshold, 400.0);
+    // Pass 2: relax tolerance for breathy/complex timbres (e.g. vocal whistles).
+    if (freqs.empty()) freqs = collect(std::min(yin_threshold * 2.0f, 0.5f), 400.0);
 
     if (freqs.empty()) return 0.0;
 
@@ -239,41 +248,59 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     // --- Collect raw frequency estimates per segment via aubio yinfft ---
     // Stream the whole file through aubio at hop = win/2.  Each correction
     // segment receives ~2 estimates; we take the median of the valid ones.
-    aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
-                                         static_cast<uint_t>(sample_rate));
-    aubio_pitch_set_unit(pd, "Hz");
-    aubio_pitch_set_tolerance(pd, yin_threshold);
-    aubio_pitch_set_silence(pd, -80.f);
-
-    fvec_t* ibuf = new_fvec(hop);
-    fvec_t* obuf = new_fvec(1);
-
-    std::vector<std::vector<double>> seg_freqs(static_cast<size_t>(num_segs));
-
-    for (long long pos = 0;
-         pos + static_cast<long long>(hop) <= total_frames;
-         pos += static_cast<long long>(hop))
+    // Try with the user-supplied tolerance first; if too few segments get any
+    // valid reading, retry with a more permissive tolerance (helps for breathy
+    // or noisy timbres where the YIN aperiodicity threshold is not met).
+    auto run_pass = [&](float tol, double gate_cents,
+                        std::vector<std::vector<double>>& out)
     {
-        for (uint_t i = 0; i < hop; ++i)
-            ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
+        aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
+                                             static_cast<uint_t>(sample_rate));
+        aubio_pitch_set_unit(pd, "Hz");
+        aubio_pitch_set_tolerance(pd, tol);
+        aubio_pitch_set_silence(pd, -80.f);
 
-        aubio_pitch_do(pd, ibuf, obuf);
-        float f = obuf->data[0];
+        fvec_t* ibuf = new_fvec(hop);
+        fvec_t* obuf = new_fvec(1);
 
-        if (f > 15.f && f < 22000.f) {
-            double snapped = snap_to_octave(static_cast<double>(f), target_freq);
-            double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
-            if (cents <= 200.0) {
-                long long seg_idx = pos / seg;
-                if (seg_idx < num_segs)
-                    seg_freqs[static_cast<size_t>(seg_idx)].push_back(snapped);
+        for (long long pos = 0;
+             pos + static_cast<long long>(hop) <= total_frames;
+             pos += static_cast<long long>(hop))
+        {
+            for (uint_t i = 0; i < hop; ++i)
+                ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
+
+            aubio_pitch_do(pd, ibuf, obuf);
+            float f = obuf->data[0];
+
+            if (f > 15.f && f < 22000.f) {
+                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+                double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
+                if (cents <= gate_cents) {
+                    long long seg_idx = pos / seg;
+                    if (seg_idx < num_segs)
+                        out[static_cast<size_t>(seg_idx)].push_back(snapped);
+                }
             }
         }
-    }
 
-    del_fvec(ibuf);
-    del_fvec(obuf);
-    del_aubio_pitch(pd);
+        del_fvec(ibuf);
+        del_fvec(obuf);
+        del_aubio_pitch(pd);
+    };
+
+    std::vector<std::vector<double>> seg_freqs(static_cast<size_t>(num_segs));
+    run_pass(yin_threshold, 400.0, seg_freqs);
+
+    // Count how many segments have at least one valid estimate.
+    long long covered = 0;
+    for (const auto& v : seg_freqs) if (!v.empty()) ++covered;
+
+    // If fewer than half the segments have data, retry with relaxed tolerance.
+    if (covered < num_segs / 2) {
+        seg_freqs.assign(static_cast<size_t>(num_segs), {});
+        run_pass(std::min(yin_threshold * 2.0f, 0.5f), 400.0, seg_freqs);
+    }
 
     // Reduce each segment's estimates to a single median value.
     std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
