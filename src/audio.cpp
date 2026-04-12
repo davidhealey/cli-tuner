@@ -177,9 +177,13 @@ double detect_overall_pitch(const std::vector<float>& samples,
         {
             float conf = 0.0f;
             float f = yin.detect(mono.data() + pos, win, &conf);
-            if (f > 15.0f && f < 22000.0f && conf >= conf_threshold)
-                freqs.push_back(static_cast<float>(
-                    snap_to_octave(static_cast<double>(f), target_freq)));
+            if (f > 15.0f && f < 22000.0f && conf >= conf_threshold) {
+                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+                // Reject anything still more than 2 semitones from target after
+                // octave correction — catches non-octave harmonic detections.
+                if (std::abs(1200.0 * std::log2(snapped / target_freq)) <= 200.0)
+                    freqs.push_back(static_cast<float>(snapped));
+            }
         }
         return freqs;
     };
@@ -207,25 +211,39 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
 
-    // Use window size as the correction segment size.
-    // Each segment gets its own YIN analysis and resampling ratio.
     int win = yin_window_for_rate(sample_rate);
-    int seg = win; // segment = window (keep it simple)
+    // Correction segments are 4× the YIN window (~460 ms at 44.1 kHz).
+    // Larger segments mean each one spans several vibrato cycles, so the
+    // median of multiple YIN analyses within it reflects the centre pitch
+    // rather than an instantaneous vibrato excursion.
+    int seg = win * 4;
+    int hop = win / 2; // hop between analyses within a segment
     YIN yin(sample_rate, win, yin_threshold);
 
     long long num_segs = (total_frames + seg - 1) / seg;
 
     // --- Collect raw frequency estimates per segment ---
+    // Run YIN at every hop position inside the segment and take the median.
     std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
     for (long long s = 0; s < num_segs; ++s) {
-        long long start = s * seg;
-        long long len   = std::min(static_cast<long long>(seg), total_frames - start);
-        if (len < win) continue; // segment too short for reliable analysis
+        long long seg_start = s * seg;
+        long long seg_end   = std::min(seg_start + static_cast<long long>(seg), total_frames);
 
-        float conf = 0.0f;
-        float f = yin.detect(mono.data() + start, static_cast<int>(len), &conf);
-        if (f > 15.0f && f < 22000.0f && conf > 0.4f)
-            raw[static_cast<size_t>(s)] = snap_to_octave(static_cast<double>(f), target_freq);
+        std::vector<double> seg_pitches;
+        for (long long pos = seg_start; pos + win <= seg_end; pos += hop) {
+            float conf = 0.0f;
+            float f = yin.detect(mono.data() + pos, win, &conf);
+            if (f > 15.0f && f < 22000.0f && conf > 0.4f) {
+                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+                if (std::abs(1200.0 * std::log2(snapped / target_freq)) <= 200.0)
+                    seg_pitches.push_back(snapped);
+            }
+        }
+
+        if (!seg_pitches.empty()) {
+            std::sort(seg_pitches.begin(), seg_pitches.end());
+            raw[static_cast<size_t>(s)] = seg_pitches[seg_pitches.size() / 2];
+        }
     }
 
     // --- Interpolate missing estimates ---
