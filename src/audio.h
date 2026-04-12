@@ -46,13 +46,16 @@ bool save_audio(const std::string& path,
 // Uses YIN on multiple windows and returns the median (robust against outliers).
 // Returns frequency in Hz, or 0 on failure.
 // If warn_bimodal is true (default) and two distinct pitch clusters are found,
-// a diagnostic warning is printed to stderr with a suggested -f value.
+// a diagnostic warning is printed to stderr.
+// If secondary_out is non-null and bimodality is detected, it is filled with
+// the secondary cluster's median frequency so the caller can act on it.
 double detect_overall_pitch(const std::vector<float>& samples,
                             int       channels,
                             int       sample_rate,
                             double    target_freq,
                             float     yin_threshold,
-                            bool      warn_bimodal = true);
+                            bool      warn_bimodal   = true,
+                            double*   secondary_out  = nullptr);
 
 // Compute per-segment drift corrections to retune audio toward target_freq.
 // Analysis is done on the first channel of the interleaved buffer.

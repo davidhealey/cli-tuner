@@ -161,7 +161,8 @@ double detect_overall_pitch(const std::vector<float>& samples,
                             int       sample_rate,
                             double    target_freq,
                             float     yin_threshold,
-                            bool      warn_bimodal)
+                            bool      warn_bimodal,
+                            double*   secondary_out)
 {
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
@@ -231,8 +232,8 @@ double detect_overall_pitch(const std::vector<float>& samples,
     // If the sorted pitch estimates have a clear gap (> 15 cents) with enough
     // samples on both sides, the recording likely contains two simultaneous pitch
     // components (e.g. a vocal whistle where the voice and the whistle both register).
-    // Warn so the user can re-run with -f to target the correct component.
-    if (warn_bimodal && freqs.size() >= 6) {
+    // Detection always runs; printing is conditional on warn_bimodal.
+    if (freqs.size() >= 6) {
         const double kBimodalGapCents = 15.0;
         const size_t kMinClusterSize  = 3;
 
@@ -265,16 +266,25 @@ double detect_overall_pitch(const std::vector<float>& samples,
             size_t dom_cnt = dom_is_low ? n_low   : n_high;
             size_t alt_cnt = dom_is_low ? n_high  : n_low;
 
-            std::cerr << std::fixed << std::setprecision(1)
-                      << "Warning: two pitch components detected.\n"
-                      << "  Dominant  : " << dom_hz << " Hz  ("
-                      << (dom_c >= 0 ? "+" : "") << dom_c << "c)  ["
-                      << dom_cnt << " frames]\n"
-                      << "  Secondary : " << alt_hz << " Hz  ("
-                      << (alt_c >= 0 ? "+" : "") << alt_c << "c)  ["
-                      << alt_cnt << " frames]\n"
-                      << "  Using dominant. If the secondary is the target "
-                         "component, re-run with: -f " << alt_hz << "\n";
+            if (secondary_out) *secondary_out = alt_hz;
+
+            if (warn_bimodal) {
+                std::cerr << std::fixed << std::setprecision(1)
+                          << "Warning: two pitch components detected.\n"
+                          << "  Dominant  : " << dom_hz << " Hz  ("
+                          << (dom_c >= 0 ? "+" : "") << dom_c << "c)  ["
+                          << dom_cnt << " frames]\n"
+                          << "  Secondary : " << alt_hz << " Hz  ("
+                          << (alt_c >= 0 ? "+" : "") << alt_c << "c)  ["
+                          << alt_cnt << " frames]\n";
+                if (secondary_out)
+                    std::cerr << "  Auto-selecting secondary (-s flag).\n";
+                else
+                    std::cerr << "  Using dominant. If secondary is the target "
+                                 "component, re-run with: -f " << alt_hz << "\n"
+                              << "  Or use -s to auto-select the secondary "
+                                 "whenever two components are detected.\n";
+            }
         }
     }
 

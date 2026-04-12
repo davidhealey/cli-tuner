@@ -25,9 +25,11 @@ static void print_usage(const char* prog)
         << "  -a          Analyse the first input file and print per-segment pitch\n"
         << "              detection details.  No output files are written.\n"
         << "              Useful for diagnosing detection quality.\n"
+        << "  -s          Auto-select the secondary pitch component when two are\n"
+        << "              detected (e.g. voice + whistle).  Applies a uniform shift\n"
+        << "              using the secondary frequency.  Overridden by -f.\n"
         << "  -f <hz>     Force the source pitch to this frequency (Hz) instead of\n"
-        << "              auto-detecting it.  Use when the detector finds the wrong\n"
-        << "              component in a multi-pitch recording (e.g. vocal+instrument).\n"
+        << "              auto-detecting it.  Overrides -s if both are given.\n"
         << "              Bypasses automatic detection; applies a uniform shift only.\n"
         << "  -c <cents>  Minimum correction threshold in cents (default: 5).\n"
         << "              Files detected within this many cents of target are\n"
@@ -45,6 +47,7 @@ static void print_usage(const char* prog)
         << "  " << prog << " -n 60 -o tuned/ sample.wav\n"
         << "  " << prog << " -n 60 -m drift -o tuned/ close.wav room.wav\n"
         << "  " << prog << " -n 60 -a sample.wav\n"
+        << "  " << prog << " -n 80 -s -o tuned/ vocal_whistle.wav\n"
         << "  " << prog << " -n 80 -f 820 -o tuned/ vocal_whistle.wav\n";
 }
 
@@ -65,11 +68,13 @@ int main(int argc, char* argv[])
     std::string mode               = "shift";
     float       yin_threshold      = 0.15f;
     double      min_correction_cents = 5.0;
-    double      forced_src_freq    = 0.0;
+    double      forced_src_freq    = 0.0; // set by -f; may also be set by -s auto-detect
+    bool        forced_by_flag     = false; // true only when -f was explicitly given
+    bool        use_secondary      = false;
     bool        analyze_mode       = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:o:m:t:c:f:ah")) != -1) {
+    while ((opt = getopt(argc, argv, "n:o:m:t:c:f:ash")) != -1) {
         switch (opt) {
             case 'n':
                 try { midi_note = std::stoi(optarg); }
@@ -95,12 +100,13 @@ int main(int argc, char* argv[])
                 }
                 break;
             case 'f':
-                try { forced_src_freq = std::stod(optarg); }
+                try { forced_src_freq = std::stod(optarg); forced_by_flag = true; }
                 catch (...) {
                     std::cerr << "Error: invalid frequency '" << optarg << "'\n";
                     return 1;
                 }
                 break;
+            case 's': use_secondary  = true;  break;
             case 'a': analyze_mode   = true;  break;
             case 'h': print_usage(argv[0]); return 0;
             default:  print_usage(argv[0]); return 1;
@@ -192,10 +198,16 @@ int main(int argc, char* argv[])
         std::vector<SegmentCorrection> prev_corr;
         double prev_global = 0.0;
 
-        if (forced_src_freq > 0.0) {
-            // Manual frequency override — skip all detection
-            prev_global = forced_src_freq;
-            double ratio  = forced_src_freq / target_freq;
+        // Resolve effective source: -f overrides -s; -s probes for secondary
+        double effective_freq = forced_src_freq;
+        if (effective_freq == 0.0 && use_secondary) {
+            detect_overall_pitch(ref_samples, ref_ch, ref_sr, target_freq,
+                                 yin_threshold, false, &effective_freq);
+        }
+
+        if (effective_freq > 0.0) {
+            prev_global = effective_freq;
+            double ratio = effective_freq / target_freq;
             ratio = std::max(0.707, std::min(1.414, ratio));
             long long out_fr = std::llround(
                 static_cast<double>(ref_frames) * ratio);
@@ -216,8 +228,11 @@ int main(int argc, char* argv[])
                 &prev_global, false);
         }
 
-        std::cout << "--- Predicted output (mode: "
-                  << (forced_src_freq > 0.0 ? "forced" : mode) << ") ---\n";
+        const char* preview_mode_label =
+            (forced_src_freq > 0.0) ? "forced" :
+            (use_secondary && effective_freq > 0.0) ? "auto-secondary" :
+            mode.c_str();
+        std::cout << "--- Predicted output (mode: " << preview_mode_label << ") ---\n";
 
         if (prev_global <= 0.0 || prev_corr.empty()) {
             std::cout << "  Detection failed – cannot predict output pitch.\n\n";
@@ -241,8 +256,25 @@ int main(int argc, char* argv[])
         std::cout << "  Action : correct\n";
         std::vector<float> prev_out =
             apply_corrections(ref_samples, ref_ch, prev_corr);
-        double out_pitch = detect_overall_pitch(prev_out, ref_ch, ref_sr,
-                                                target_freq, yin_threshold, false);
+
+        // When -s was used to pick the secondary component, re-detect with
+        // secondary_out so we report the secondary's post-correction pitch
+        // rather than the still-dominant first component.
+        double out_pitch = 0.0;
+        bool   reported_secondary = false;
+        if (use_secondary && effective_freq > 0.0) {
+            double out_secondary = 0.0;
+            detect_overall_pitch(prev_out, ref_ch, ref_sr,
+                                 target_freq, yin_threshold, false, &out_secondary);
+            if (out_secondary > 0.0) {
+                out_pitch = out_secondary;
+                reported_secondary = true;
+            }
+        }
+        if (!reported_secondary)
+            out_pitch = detect_overall_pitch(prev_out, ref_ch, ref_sr,
+                                             target_freq, yin_threshold, false);
+
         if (out_pitch > 0.0) {
             double out_cents = 1200.0 * std::log2(out_pitch / target_freq);
             std::cout << "  Output : " << out_pitch << " Hz  ("
@@ -259,13 +291,27 @@ int main(int argc, char* argv[])
     // than the original.  Files within this range are copied unchanged.
 
     // --- Compute corrections from the reference file ---
+
+    // If -s is set and no -f override, auto-detect the secondary component.
+    // detect_overall_pitch fills forced_src_freq and prints the warning;
+    // subsequent code treats it identically to an explicit -f value.
+    if (use_secondary && forced_src_freq == 0.0) {
+        double secondary = 0.0;
+        detect_overall_pitch(ref_samples, ref_ch, ref_sr, target_freq,
+                             yin_threshold, true, &secondary);
+        if (secondary > 0.0)
+            forced_src_freq = secondary;
+        // If no secondary found, forced_src_freq stays 0 and normal detection runs.
+    }
+
     std::vector<SegmentCorrection> corrections;
     double detected_global = 0.0; // filled by both branches
 
     if (forced_src_freq > 0.0) {
         detected_global = forced_src_freq;
         double shift_c = 1200.0 * std::log2(forced_src_freq / target_freq);
-        std::cout << "  Source : " << forced_src_freq << " Hz  (forced)\n";
+        std::cout << "  Source : " << forced_src_freq << " Hz  ("
+                  << (forced_by_flag ? "forced" : "auto-selected secondary") << ")\n";
         std::cout << "  Target : " << target_freq << " Hz\n";
         std::cout << "  Shift  : " << (shift_c >= 0 ? "+" : "") << shift_c << " cents\n";
         double ratio = forced_src_freq / target_freq;
