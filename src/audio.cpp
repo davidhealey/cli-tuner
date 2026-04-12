@@ -1,6 +1,6 @@
 #include "audio.h"
-#include "yin.h"
 
+#include <aubio/aubio.h>
 #include <sndfile.h>
 #include <samplerate.h>
 
@@ -14,10 +14,10 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Choose a YIN window size that allows detection down to ~20 Hz.
+// Analysis window size that allows detection down to ~20 Hz.
 // Minimum detectable frequency = sample_rate / (window_size / 2)
 // We round up to the nearest multiple of 512 for alignment.
-static int yin_window_for_rate(int sample_rate)
+static int analysis_window_for_rate(int sample_rate)
 {
     // We need: window_size / 2 >= sample_rate / 20
     int min_half = static_cast<int>(std::ceil(sample_rate / 20.0));
@@ -150,37 +150,51 @@ double detect_overall_pitch(const std::vector<float>& samples,
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
 
-    int win = yin_window_for_rate(sample_rate);
-    YIN yin(sample_rate, win, yin_threshold);
-    int hop = win / 2;
+    uint_t win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
+    uint_t hop = win / 2;
 
     // Skip the first and last 5% to avoid transient and release artefacts
     long long skip = total_frames / 20;
     long long analysis_start = skip;
     long long analysis_end   = total_frames - skip;
 
-    auto collect = [&](float conf_threshold) {
-        std::vector<float> freqs;
-        for (long long pos = analysis_start;
-             pos + win <= analysis_end;
-             pos += hop)
-        {
-            float conf = 0.0f;
-            float f = yin.detect(mono.data() + pos, win, &conf);
-            if (f > 15.0f && f < 22000.0f && conf >= conf_threshold) {
-                // Accept only detections within 2 semitones of target.
-                // The target is known, so anything further away is a bad detection.
-                double cents = std::abs(1200.0 * std::log2(
-                    static_cast<double>(f) / target_freq));
-                if (cents <= 200.0)
-                    freqs.push_back(f);
-            }
-        }
-        return freqs;
-    };
+    // Note: aubio_pitch_get_confidence() returns 0.0 for the "yinfft" method in
+    // many aubio builds even when detection is perfect.  We therefore rely on
+    // the 200-cent gate around the known target frequency as our quality filter
+    // instead of confidence.  The tolerance parameter still influences the
+    // internal YIN aperiodicity threshold and thus which frames aubio considers
+    // voiced at all (non-zero output).
+    aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
+                                         static_cast<uint_t>(sample_rate));
+    aubio_pitch_set_unit(pd, "Hz");
+    aubio_pitch_set_tolerance(pd, yin_threshold);
+    aubio_pitch_set_silence(pd, -80.f);
 
-    std::vector<float> freqs = collect(0.4f);
-    if (freqs.empty()) freqs = collect(0.2f); // relax if nothing found (e.g. breathy timbres)
+    fvec_t* ibuf = new_fvec(hop);
+    fvec_t* obuf = new_fvec(1);
+
+    std::vector<float> freqs;
+    for (long long pos = analysis_start;
+         pos + static_cast<long long>(hop) <= analysis_end;
+         pos += static_cast<long long>(hop))
+    {
+        for (uint_t i = 0; i < hop; ++i)
+            ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
+
+        aubio_pitch_do(pd, ibuf, obuf);
+        float f = obuf->data[0];
+
+        if (f > 15.f && f < 22000.f) {
+            double cents = std::abs(1200.0 * std::log2(
+                static_cast<double>(f) / target_freq));
+            if (cents <= 200.0)
+                freqs.push_back(f);
+        }
+    }
+
+    del_fvec(ibuf);
+    del_fvec(obuf);
+    del_aubio_pitch(pd);
 
     if (freqs.empty()) return 0.0;
 
@@ -202,26 +216,58 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
 
-    int win = yin_window_for_rate(sample_rate);
-    int seg = win; // one correction segment per YIN window (~106 ms at 48 kHz)
-    YIN yin(sample_rate, win, yin_threshold);
+    uint_t win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
+    uint_t hop = win / 2;
+    int    seg = static_cast<int>(win); // one correction segment per analysis window
 
     long long num_segs = (total_frames + seg - 1) / seg;
 
-    // --- Collect raw frequency estimates per segment ---
-    std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
-    for (long long s = 0; s < num_segs; ++s) {
-        long long start = s * seg;
-        long long len   = std::min(static_cast<long long>(seg), total_frames - start);
-        if (len < win) continue;
+    // --- Collect raw frequency estimates per segment via aubio yinfft ---
+    // Stream the whole file through aubio at hop = win/2.  Each correction
+    // segment receives ~2 estimates; we take the median of the valid ones.
+    aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
+                                         static_cast<uint_t>(sample_rate));
+    aubio_pitch_set_unit(pd, "Hz");
+    aubio_pitch_set_tolerance(pd, yin_threshold);
+    aubio_pitch_set_silence(pd, -80.f);
 
-        float conf = 0.0f;
-        float f = yin.detect(mono.data() + start, win, &conf);
-        if (f > 15.0f && f < 22000.0f && conf > 0.2f) {
+    fvec_t* ibuf = new_fvec(hop);
+    fvec_t* obuf = new_fvec(1);
+
+    std::vector<std::vector<double>> seg_freqs(static_cast<size_t>(num_segs));
+
+    for (long long pos = 0;
+         pos + static_cast<long long>(hop) <= total_frames;
+         pos += static_cast<long long>(hop))
+    {
+        for (uint_t i = 0; i < hop; ++i)
+            ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
+
+        aubio_pitch_do(pd, ibuf, obuf);
+        float f = obuf->data[0];
+
+        if (f > 15.f && f < 22000.f) {
             double freq  = static_cast<double>(f);
             double cents = std::abs(1200.0 * std::log2(freq / target_freq));
-            if (cents <= 200.0)
-                raw[static_cast<size_t>(s)] = freq;
+            if (cents <= 200.0) {
+                long long seg_idx = pos / seg;
+                if (seg_idx < num_segs)
+                    seg_freqs[static_cast<size_t>(seg_idx)].push_back(freq);
+            }
+        }
+    }
+
+    del_fvec(ibuf);
+    del_fvec(obuf);
+    del_aubio_pitch(pd);
+
+    // Reduce each segment's estimates to a single median value.
+    std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
+    for (long long s = 0; s < num_segs; ++s) {
+        auto& v = seg_freqs[static_cast<size_t>(s)];
+        if (!v.empty()) {
+            std::sort(v.begin(), v.end());
+            raw[static_cast<size_t>(s)] = v[v.size() / 2];
         }
     }
 

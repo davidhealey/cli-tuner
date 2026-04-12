@@ -4,11 +4,12 @@ CXXFLAGS := -std=c++17 -O2 -Wall -Wextra -Wno-unused-parameter
 # Use pkg-config when available, fall back to plain -l flags
 PKG_SNDFILE    := $(shell pkg-config --cflags --libs sndfile    2>/dev/null || echo "-lsndfile")
 PKG_SAMPLERATE := $(shell pkg-config --cflags --libs samplerate 2>/dev/null || echo "-lsamplerate")
+PKG_AUBIO      := $(shell pkg-config --cflags --libs aubio      2>/dev/null || echo "-laubio")
 
-LDFLAGS  := $(PKG_SNDFILE) $(PKG_SAMPLERATE)
+LDFLAGS  := $(PKG_SNDFILE) $(PKG_SAMPLERATE) $(PKG_AUBIO)
 
 SRCDIR   := src
-SRCS     := $(SRCDIR)/main.cpp $(SRCDIR)/audio.cpp $(SRCDIR)/yin.cpp
+SRCS     := $(SRCDIR)/main.cpp $(SRCDIR)/audio.cpp
 OBJS     := $(SRCS:.cpp=.o)
 TARGET   := cli-tuner
 
@@ -30,5 +31,4 @@ install: $(TARGET)
 
 # Header dependencies
 $(SRCDIR)/main.o:  $(SRCDIR)/main.cpp  $(SRCDIR)/audio.h
-$(SRCDIR)/audio.o: $(SRCDIR)/audio.cpp $(SRCDIR)/audio.h $(SRCDIR)/yin.h
-$(SRCDIR)/yin.o:   $(SRCDIR)/yin.cpp   $(SRCDIR)/yin.h
+$(SRCDIR)/audio.o: $(SRCDIR)/audio.cpp $(SRCDIR)/audio.h
