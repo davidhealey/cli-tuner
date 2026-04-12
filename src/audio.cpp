@@ -168,22 +168,6 @@ double detect_overall_pitch(const std::vector<float>& samples,
     std::vector<float> mono = to_mono(samples, channels, total_frames);
 
     uint_t win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
-
-    // For high-pitched targets the default window (up to 5120 frames at 48 kHz)
-    // can be larger than the entire note body of a short staccatissimo sample,
-    // leaving too few hops in the counted region.  Scale the window down so it
-    // spans at most ~15 complete periods of the target pitch.  Round to the
-    // nearest 256-frame boundary and never go below 512.  Low-pitched targets
-    // are unaffected.
-    if (target_freq > 20.0) {
-        const int kMinPeriods = 15;
-        auto target_half = static_cast<uint_t>(
-            std::ceil(kMinPeriods * static_cast<double>(sample_rate) / target_freq));
-        target_half = std::max(static_cast<uint_t>(256),
-                               ((target_half + 255) / 256) * 256);
-        win = std::min(win, target_half * 2);
-    }
-
     uint_t hop = win / 2;
 
     // aubio_pitch_get_confidence() returns 0.0 for "yinfft" in many aubio builds,
