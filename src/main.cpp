@@ -25,6 +25,10 @@ static void print_usage(const char* prog)
         << "  -a          Analyse the first input file and print per-segment pitch\n"
         << "              detection details.  No output files are written.\n"
         << "              Useful for diagnosing detection quality.\n"
+        << "  -F <hz>     Force the source pitch to this frequency (Hz) instead of\n"
+        << "              auto-detecting it.  Use when the detector finds the wrong\n"
+        << "              component in a multi-pitch recording (e.g. vocal+instrument).\n"
+        << "              Bypasses automatic detection; applies a uniform shift only.\n"
         << "  -c <cents>  Minimum correction threshold in cents (default: 5).\n"
         << "              Files detected within this many cents of target are\n"
         << "              copied unchanged rather than corrected.  Use 0 to\n"
@@ -40,7 +44,8 @@ static void print_usage(const char* prog)
         << "Examples:\n"
         << "  " << prog << " -n 60 -o tuned/ sample.wav\n"
         << "  " << prog << " -n 60 -m drift -o tuned/ close.wav room.wav\n"
-        << "  " << prog << " -n 60 -a sample.wav\n";
+        << "  " << prog << " -n 60 -a sample.wav\n"
+        << "  " << prog << " -n 80 -F 820 -o tuned/ vocal_whistle.wav\n";
 }
 
 static double midi_to_freq(int note)
@@ -60,10 +65,11 @@ int main(int argc, char* argv[])
     std::string mode               = "shift";
     float       yin_threshold      = 0.15f;
     double      min_correction_cents = 5.0;
+    double      forced_src_freq    = 0.0;
     bool        analyze_mode       = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:o:m:t:c:ah")) != -1) {
+    while ((opt = getopt(argc, argv, "n:o:m:t:c:F:ah")) != -1) {
         switch (opt) {
             case 'n':
                 try { midi_note = std::stoi(optarg); }
@@ -85,6 +91,13 @@ int main(int argc, char* argv[])
                 try { min_correction_cents = std::stod(optarg); }
                 catch (...) {
                     std::cerr << "Error: invalid cents value '" << optarg << "'\n";
+                    return 1;
+                }
+                break;
+            case 'F':
+                try { forced_src_freq = std::stod(optarg); }
+                catch (...) {
+                    std::cerr << "Error: invalid frequency '" << optarg << "'\n";
                     return 1;
                 }
                 break;
@@ -113,6 +126,10 @@ int main(int argc, char* argv[])
     }
     if (yin_threshold < 0.01f || yin_threshold > 0.5f) {
         std::cerr << "Error: threshold should be in the range 0.01–0.50\n";
+        return 1;
+    }
+    if (forced_src_freq != 0.0 && (forced_src_freq < 20.0 || forced_src_freq > 20000.0)) {
+        std::cerr << "Error: -F frequency must be in the range 20–20000 Hz\n";
         return 1;
     }
 
@@ -175,7 +192,15 @@ int main(int argc, char* argv[])
         std::vector<SegmentCorrection> prev_corr;
         double prev_global = 0.0;
 
-        if (mode == "shift") {
+        if (forced_src_freq > 0.0) {
+            // Manual frequency override — skip all detection
+            prev_global = forced_src_freq;
+            double ratio  = forced_src_freq / target_freq;
+            ratio = std::max(0.707, std::min(1.414, ratio));
+            long long out_fr = std::llround(
+                static_cast<double>(ref_frames) * ratio);
+            prev_corr.push_back({ 0LL, ref_frames, out_fr, ratio });
+        } else if (mode == "shift") {
             double det = detect_overall_pitch(ref_samples, ref_ch, ref_sr,
                                               target_freq, yin_threshold);
             if (det > 0.0) {
@@ -191,7 +216,8 @@ int main(int argc, char* argv[])
                 &prev_global);
         }
 
-        std::cout << "--- Predicted output (mode: " << mode << ") ---\n";
+        std::cout << "--- Predicted output (mode: "
+                  << (forced_src_freq > 0.0 ? "forced" : mode) << ") ---\n";
 
         if (prev_global <= 0.0 || prev_corr.empty()) {
             std::cout << "  Detection failed – cannot predict output pitch.\n\n";
@@ -236,7 +262,18 @@ int main(int argc, char* argv[])
     std::vector<SegmentCorrection> corrections;
     double detected_global = 0.0; // filled by both branches
 
-    if (mode == "shift") {
+    if (forced_src_freq > 0.0) {
+        detected_global = forced_src_freq;
+        double shift_c = 1200.0 * std::log2(forced_src_freq / target_freq);
+        std::cout << "  Source : " << forced_src_freq << " Hz  (forced)\n";
+        std::cout << "  Target : " << target_freq << " Hz\n";
+        std::cout << "  Shift  : " << (shift_c >= 0 ? "+" : "") << shift_c << " cents\n";
+        double ratio = forced_src_freq / target_freq;
+        ratio = std::max(0.707, std::min(1.414, ratio));
+        long long out_fr = std::llround(static_cast<double>(ref_frames) * ratio);
+        corrections.push_back({ 0LL, ref_frames, out_fr, ratio });
+
+    } else if (mode == "shift") {
         double detected = detect_overall_pitch(ref_samples, ref_ch, ref_sr, target_freq, yin_threshold);
         if (detected <= 0.0) {
             std::cerr << "Error: could not detect pitch in '"
