@@ -14,6 +14,20 @@
 // Helpers
 // ---------------------------------------------------------------------------
 
+// Snap a detected frequency to the nearest octave multiple of target_freq.
+// aubio yinfft frequently returns the sub-octave (f/2) or super-octave (f*2)
+// instead of the true fundamental.  Because the caller always knows the
+// expected pitch (the MIDI note number), we can use it to disambiguate.
+// After snapping, a 200-cent gate is still applied to reject genuinely bad
+// detections (noise, unvoiced frames, etc.).
+static double snap_to_octave(double f, double target_freq)
+{
+    if (f <= 0.0 || target_freq <= 0.0) return f;
+    // Number of octaves to shift: round log2(f / target) to the nearest integer
+    double octaves = std::round(std::log2(f / target_freq));
+    return f / std::pow(2.0, octaves);
+}
+
 // Analysis window size that allows detection down to ~20 Hz.
 // Minimum detectable frequency = sample_rate / (window_size / 2)
 // We round up to the nearest multiple of 512 for alignment.
@@ -185,10 +199,10 @@ double detect_overall_pitch(const std::vector<float>& samples,
         float f = obuf->data[0];
 
         if (f > 15.f && f < 22000.f) {
-            double cents = std::abs(1200.0 * std::log2(
-                static_cast<double>(f) / target_freq));
+            double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+            double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
             if (cents <= 200.0)
-                freqs.push_back(f);
+                freqs.push_back(static_cast<float>(snapped));
         }
     }
 
@@ -247,12 +261,12 @@ std::vector<SegmentCorrection> compute_drift_corrections(
         float f = obuf->data[0];
 
         if (f > 15.f && f < 22000.f) {
-            double freq  = static_cast<double>(f);
-            double cents = std::abs(1200.0 * std::log2(freq / target_freq));
+            double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+            double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
             if (cents <= 200.0) {
                 long long seg_idx = pos / seg;
                 if (seg_idx < num_segs)
-                    seg_freqs[static_cast<size_t>(seg_idx)].push_back(freq);
+                    seg_freqs[static_cast<size_t>(seg_idx)].push_back(snapped);
             }
         }
     }
