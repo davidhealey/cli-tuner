@@ -25,16 +25,6 @@ static int yin_window_for_rate(int sample_rate)
     return half * 2;
 }
 
-// Snap freq to the octave of reference_freq that is closest.
-// Corrects YIN octave errors when the expected pitch is known.
-// e.g. snap_to_octave(880, 440) == 440, snap_to_octave(220, 440) == 440
-static double snap_to_octave(double freq, double reference_freq)
-{
-    if (freq <= 0.0 || reference_freq <= 0.0) return freq;
-    double octaves = std::log2(freq / reference_freq);
-    return freq / std::pow(2.0, std::round(octaves));
-}
-
 // Extract first channel from interleaved buffer.
 static std::vector<float> to_mono(const std::vector<float>& interleaved,
                                    int channels, long long frames)
@@ -178,11 +168,12 @@ double detect_overall_pitch(const std::vector<float>& samples,
             float conf = 0.0f;
             float f = yin.detect(mono.data() + pos, win, &conf);
             if (f > 15.0f && f < 22000.0f && conf >= conf_threshold) {
-                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
-                // Reject anything still more than 2 semitones from target after
-                // octave correction — catches non-octave harmonic detections.
-                if (std::abs(1200.0 * std::log2(snapped / target_freq)) <= 200.0)
-                    freqs.push_back(static_cast<float>(snapped));
+                // Accept only detections within 2 semitones of target.
+                // The target is known, so anything further away is a bad detection.
+                double cents = std::abs(1200.0 * std::log2(
+                    static_cast<double>(f) / target_freq));
+                if (cents <= 200.0)
+                    freqs.push_back(f);
             }
         }
         return freqs;
@@ -227,9 +218,10 @@ std::vector<SegmentCorrection> compute_drift_corrections(
         float conf = 0.0f;
         float f = yin.detect(mono.data() + start, win, &conf);
         if (f > 15.0f && f < 22000.0f && conf > 0.4f) {
-            double snapped = snap_to_octave(static_cast<double>(f), target_freq);
-            if (std::abs(1200.0 * std::log2(snapped / target_freq)) <= 200.0)
-                raw[static_cast<size_t>(s)] = snapped;
+            double freq  = static_cast<double>(f);
+            double cents = std::abs(1200.0 * std::log2(freq / target_freq));
+            if (cents <= 200.0)
+                raw[static_cast<size_t>(s)] = freq;
         }
     }
 
