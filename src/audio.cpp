@@ -177,8 +177,10 @@ double detect_overall_pitch(const std::vector<float>& samples,
     // The tolerance controls the YIN aperiodicity threshold — lower is stricter
     // and will return 0 Hz for breathy/noisy frames.  We try progressively more
     // permissive settings so that vocal whistles, breathy flutes, etc. still work.
-    // gate_cents: radius around target (post-octave-snap); 400 cents = 4 semitones,
-    //             well below the 1200-cent octave so octave errors are still rejected.
+    // gate_cents: radius around target (post-octave-snap); 200 cents = 2 semitones.
+    //             Octave errors (1200 cents) are rejected even before the gate by
+    //             snap_to_octave(), so 200 cents is enough for normally-tuned samples
+    //             while still rejecting spurious off-frequency detections.
     auto collect = [&](float tol, double gate_cents) {
         aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
                                              static_cast<uint_t>(sample_rate));
@@ -215,9 +217,9 @@ double detect_overall_pitch(const std::vector<float>& samples,
     };
 
     // Pass 1: user-supplied tolerance, ±400-cent gate (4 semitones).
-    std::vector<float> freqs = collect(yin_threshold, 400.0);
+    std::vector<float> freqs = collect(yin_threshold, 200.0);
     // Pass 2: relax tolerance for breathy/complex timbres (e.g. vocal whistles).
-    if (freqs.empty()) freqs = collect(std::min(yin_threshold * 2.0f, 0.5f), 400.0);
+    if (freqs.empty()) freqs = collect(std::min(yin_threshold * 2.0f, 0.5f), 200.0);
 
     if (freqs.empty()) return 0.0;
 
@@ -290,7 +292,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     };
 
     std::vector<std::vector<double>> seg_freqs(static_cast<size_t>(num_segs));
-    run_pass(yin_threshold, 400.0, seg_freqs);
+    run_pass(yin_threshold, 200.0, seg_freqs);
 
     // Count how many segments have at least one valid estimate.
     long long covered = 0;
@@ -299,7 +301,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     // If fewer than half the segments have data, retry with relaxed tolerance.
     if (covered < num_segs / 2) {
         seg_freqs.assign(static_cast<size_t>(num_segs), {});
-        run_pass(std::min(yin_threshold * 2.0f, 0.5f), 400.0, seg_freqs);
+        run_pass(std::min(yin_threshold * 2.0f, 0.5f), 200.0, seg_freqs);
     }
 
     // Reduce each segment's estimates to a single median value.
