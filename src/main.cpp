@@ -14,13 +14,17 @@ static void print_usage(const char* prog)
         << " -n <midi_note> -o <output_dir> [options] file1 [file2 ...]\n\n"
         << "Required:\n"
         << "  -n <note>   Target MIDI note number (0–127)\n"
-        << "  -o <dir>    Output directory (created if it doesn't exist)\n\n"
+        << "  -o <dir>    Output directory (created if it doesn't exist)\n"
+        << "              (not required with -a)\n\n"
         << "Options:\n"
         << "  -m <mode>   Processing mode (default: shift)\n"
         << "                -m shift  – single pitch correction across the whole file\n"
         << "                            suited for short/staccato samples\n"
         << "                -m drift  – per-segment correction to fix pitch drift\n"
         << "                            suited for sustained/legato samples\n"
+        << "  -a          Analyse the first input file and print per-segment pitch\n"
+        << "              detection details.  No output files are written.\n"
+        << "              Useful for diagnosing detection quality.\n"
         << "  -t <val>    YIN confidence threshold (default: 0.15, range 0.05–0.30)\n"
         << "              Lower values are stricter (fewer false positives).\n"
         << "  -h          Show this help\n\n"
@@ -31,7 +35,8 @@ static void print_usage(const char* prog)
         << "  Original files are never modified.\n\n"
         << "Examples:\n"
         << "  " << prog << " -n 60 -o tuned/ sample.wav\n"
-        << "  " << prog << " -n 60 -m drift -o tuned/ close.wav room.wav\n";
+        << "  " << prog << " -n 60 -m drift -o tuned/ close.wav room.wav\n"
+        << "  " << prog << " -n 60 -a sample.wav\n";
 }
 
 static double midi_to_freq(int note)
@@ -50,9 +55,10 @@ int main(int argc, char* argv[])
     std::string output_dir;
     std::string mode          = "shift";
     float       yin_threshold = 0.15f;
+    bool        analyze_mode  = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:o:m:t:h")) != -1) {
+    while ((opt = getopt(argc, argv, "n:o:m:t:ah")) != -1) {
         switch (opt) {
             case 'n':
                 try { midi_note = std::stoi(optarg); }
@@ -70,6 +76,7 @@ int main(int argc, char* argv[])
                     return 1;
                 }
                 break;
+            case 'a': analyze_mode   = true;  break;
             case 'h': print_usage(argv[0]); return 0;
             default:  print_usage(argv[0]); return 1;
         }
@@ -82,7 +89,7 @@ int main(int argc, char* argv[])
         print_usage(argv[0]);
         return 1;
     }
-    if (output_dir.empty()) {
+    if (output_dir.empty() && !analyze_mode) {
         std::cerr << "Error: output directory (-o) is required\n\n";
         print_usage(argv[0]);
         return 1;
@@ -107,28 +114,34 @@ int main(int argc, char* argv[])
         return 1;
     }
 
-    // --- Create output directory ---
-    try {
-        std::filesystem::create_directories(output_dir);
-    } catch (const std::exception& e) {
-        std::cerr << "Error creating output directory '" << output_dir
-                  << "': " << e.what() << "\n";
-        return 1;
+    // --- Create output directory (not needed for analyze mode) ---
+    if (!analyze_mode) {
+        try {
+            std::filesystem::create_directories(output_dir);
+        } catch (const std::exception& e) {
+            std::cerr << "Error creating output directory '" << output_dir
+                      << "': " << e.what() << "\n";
+            return 1;
+        }
     }
 
     double target_freq = midi_to_freq(midi_note);
 
-    std::cout << "Target : MIDI " << midi_note
-              << "  (" << target_freq << " Hz)\n";
-    std::cout << "Mode   : " << mode << "\n";
-    std::cout << "Files  : " << input_files.size() << "\n\n";
+    if (analyze_mode)
+        std::cout << "Analyzing: " << input_files[0] << "\n";
+    else {
+        std::cout << "Target : MIDI " << midi_note
+                  << "  (" << target_freq << " Hz)\n";
+        std::cout << "Mode   : " << mode << "\n";
+        std::cout << "Files  : " << input_files.size() << "\n\n";
+        std::cout << "Analysing: " << input_files[0] << "\n";
+    }
 
     // --- Load the reference file (always the first) ---
     std::vector<float> ref_samples;
     int ref_sr, ref_ch, ref_fmt;
     long long ref_frames;
 
-    std::cout << "Analysing: " << input_files[0] << "\n";
     if (!load_audio(input_files[0], ref_samples,
                     ref_sr, ref_ch, ref_frames, ref_fmt))
         return 1;
@@ -136,6 +149,15 @@ int main(int argc, char* argv[])
     std::cout << "  " << ref_sr << " Hz, " << ref_ch
               << " ch, " << static_cast<double>(ref_frames) / ref_sr
               << " s\n";
+
+    // --- Analyze mode: print diagnostics and exit ---
+    if (analyze_mode) {
+        std::cout << "  Target : MIDI " << midi_note
+                  << "  (" << target_freq << " Hz)\n"
+                  << "  YIN threshold : " << yin_threshold << "\n";
+        analyze_audio(ref_samples, ref_ch, ref_sr, target_freq, yin_threshold);
+        return 0;
+    }
 
     // --- Compute corrections from the reference file ---
     std::vector<SegmentCorrection> corrections;

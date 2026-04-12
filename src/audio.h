@@ -65,6 +65,22 @@ std::vector<SegmentCorrection> compute_drift_corrections(
 // Correction application
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// Diagnostic analysis
+// ---------------------------------------------------------------------------
+
+// Print a detailed per-segment pitch analysis to stdout without modifying any
+// audio.  Useful for diagnosing detection quality before committing to drift
+// mode.  Prints:
+//   • global detected pitch and deviation from target
+//   • per-segment raw and smoothed frequencies
+//   • whether each segment would receive a per-segment or global-only correction
+void analyze_audio(const std::vector<float>& samples,
+                   int    channels,
+                   int    sample_rate,
+                   double target_freq,
+                   float  yin_threshold);
+
 // Apply a list of corrections to audio, returning the pitch-corrected output.
 //   shift mode : pass a single SegmentCorrection covering the whole file.
 //   drift mode : pass the list from compute_drift_corrections().

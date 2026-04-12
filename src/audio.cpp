@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
 #include <numeric>
 #include <vector>
@@ -396,6 +397,184 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     }
 
     return corrections;
+}
+
+// ---------------------------------------------------------------------------
+// Diagnostic analysis
+// ---------------------------------------------------------------------------
+
+void analyze_audio(const std::vector<float>& samples,
+                   int    channels,
+                   int    sample_rate,
+                   double target_freq,
+                   float  yin_threshold)
+{
+    long long total_frames = static_cast<long long>(samples.size()) / channels;
+    std::vector<float> mono = to_mono(samples, channels, total_frames);
+
+    uint_t win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
+    uint_t hop = win / 2;
+    int    seg = static_cast<int>(win);
+    long long num_segs = (total_frames + seg - 1) / seg;
+
+    double seg_secs = static_cast<double>(seg) / sample_rate;
+
+    // --- Pass 1: global pitch ---
+    double global_freq = detect_overall_pitch(samples, channels, sample_rate,
+                                               target_freq, yin_threshold);
+    double global_cents = (global_freq > 0.0)
+        ? 1200.0 * std::log2(global_freq / target_freq)
+        : 0.0;
+
+    std::cout << "\n--- Pass 1: global pitch ---\n";
+    if (global_freq <= 0.0) {
+        std::cout << "  FAILED – no valid pitch detected in stable region\n";
+        global_freq = target_freq;
+    } else {
+        std::cout << "  Detected  : " << global_freq << " Hz\n";
+        std::cout << "  vs target : " << target_freq << " Hz  ("
+                  << (global_cents >= 0 ? "+" : "") << global_cents << " cents)\n";
+    }
+
+    // --- Pass 2: per-segment detection ---
+    const double kGateCents   = 150.0;
+    const double kMinDriftCents = 20.0;
+
+    auto run_pass = [&](float tol, std::vector<std::vector<double>>& out) {
+        aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
+                                             static_cast<uint_t>(sample_rate));
+        aubio_pitch_set_unit(pd, "Hz");
+        aubio_pitch_set_tolerance(pd, tol);
+        aubio_pitch_set_silence(pd, -80.f);
+        fvec_t* ibuf = new_fvec(hop);
+        fvec_t* obuf = new_fvec(1);
+
+        for (long long pos = 0;
+             pos + static_cast<long long>(hop) <= total_frames;
+             pos += static_cast<long long>(hop))
+        {
+            for (uint_t i = 0; i < hop; ++i)
+                ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
+            aubio_pitch_do(pd, ibuf, obuf);
+            float f = obuf->data[0];
+            if (f > 15.f && f < 22000.f) {
+                double snapped = snap_to_octave(static_cast<double>(f), target_freq);
+                if (std::abs(1200.0 * std::log2(snapped / global_freq)) <= kGateCents) {
+                    long long idx = pos / seg;
+                    if (idx < num_segs)
+                        out[static_cast<size_t>(idx)].push_back(snapped);
+                }
+            }
+        }
+        del_fvec(ibuf); del_fvec(obuf); del_aubio_pitch(pd);
+    };
+
+    std::vector<std::vector<double>> seg_freqs(static_cast<size_t>(num_segs));
+    run_pass(yin_threshold, seg_freqs);
+
+    long long covered = 0;
+    for (const auto& v : seg_freqs) if (!v.empty()) ++covered;
+    bool used_fallback = false;
+    if (covered < num_segs / 2) {
+        used_fallback = true;
+        seg_freqs.assign(static_cast<size_t>(num_segs), {});
+        run_pass(std::min(yin_threshold * 2.0f, 0.5f), seg_freqs);
+        covered = 0;
+        for (const auto& v : seg_freqs) if (!v.empty()) ++covered;
+    }
+
+    // Reduce to medians
+    std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
+    for (long long s = 0; s < num_segs; ++s) {
+        auto& v = seg_freqs[static_cast<size_t>(s)];
+        if (!v.empty()) {
+            std::sort(v.begin(), v.end());
+            raw[static_cast<size_t>(s)] = v[v.size() / 2];
+        }
+    }
+
+    // Fill missing with global
+    for (long long s = 0; s < num_segs; ++s)
+        if (raw[static_cast<size_t>(s)] <= 0.0)
+            raw[static_cast<size_t>(s)] = global_freq;
+
+    // Smooth
+    const int R = 3;
+    std::vector<double> smooth(static_cast<size_t>(num_segs));
+    for (long long s = 0; s < num_segs; ++s) {
+        long long lo = std::max(0LL, s - R), hi = std::min(num_segs - 1, s + R);
+        double sum = 0.0; int cnt = 0;
+        for (long long k = lo; k <= hi; ++k) {
+            double v = raw[static_cast<size_t>(k)];
+            if (v > 0.0) { sum += v; ++cnt; }
+        }
+        smooth[static_cast<size_t>(s)] = (cnt > 0) ? sum / cnt : global_freq;
+    }
+
+    std::cout << "\n--- Pass 2: per-segment detection ---\n";
+    std::cout << "  Window    : " << win << " samples = " << seg_secs << " s\n";
+    std::cout << "  Segments  : " << num_segs << " total, " << covered
+              << " valid detections\n";
+    std::cout << "  Tolerance : " << (used_fallback ? "relaxed (fallback)" : "normal")
+              << "  (yin_threshold="
+              << (used_fallback ? std::min(yin_threshold * 2.0f, 0.5f) : yin_threshold)
+              << ")\n\n";
+
+    std::cout << "  Seg  Time      Raw Hz    Smooth Hz  ΔGlobal    ΔTarget    Action\n";
+    std::cout << "  ---  --------  --------  ---------  ---------  ---------  ------\n";
+
+    int n_corrected = 0;
+    double min_smooth = 1e9, max_smooth = 0.0;
+    for (long long s = 0; s < num_segs; ++s) {
+        double time_s     = static_cast<double>(s) * seg_secs;
+        double raw_val    = raw[static_cast<size_t>(s)];
+        double smooth_val = smooth[static_cast<size_t>(s)];
+        bool   was_filled = seg_freqs[static_cast<size_t>(s)].empty();
+        double dev_global = 1200.0 * std::log2(smooth_val / global_freq);
+        double dev_target = 1200.0 * std::log2(smooth_val / target_freq);
+
+        const char* action;
+        if (std::abs(dev_global) >= kMinDriftCents) {
+            action = "per-seg";
+            ++n_corrected;
+            min_smooth = std::min(min_smooth, smooth_val);
+            max_smooth = std::max(max_smooth, smooth_val);
+        } else {
+            action = "global";
+        }
+
+        // Only print every segment (they may be many; truncate for very long files)
+        if (num_segs <= 120 || s < 5 || s >= num_segs - 5 ||
+            std::abs(dev_global) >= kMinDriftCents)
+        {
+            std::cout << "  " << std::setw(3) << s
+                      << "  " << std::fixed << std::setprecision(3)
+                      << std::setw(7) << time_s << "s"
+                      << "  " << std::setw(8) << std::setprecision(2)
+                      << (was_filled ? 0.0 : raw_val)
+                      << "  " << std::setw(9) << smooth_val
+                      << "  " << std::showpos << std::setw(8) << std::setprecision(1)
+                      << dev_global << "c"
+                      << "  " << std::setw(8) << dev_target << "c"
+                      << std::noshowpos
+                      << "  " << action
+                      << (was_filled ? "  [no detection]" : "")
+                      << "\n";
+        } else if (s == 5 && num_segs > 120) {
+            std::cout << "  ... (" << num_segs - 10 << " segments omitted)\n";
+        }
+    }
+
+    double applied_drift = (n_corrected > 1)
+        ? 1200.0 * std::log2(max_smooth / min_smooth) : 0.0;
+
+    std::cout << "\n  Segments with per-segment correction : "
+              << n_corrected << " / " << num_segs << "\n";
+    std::cout << "  Applied drift range                 : "
+              << applied_drift << " cents peak-to-peak\n";
+    std::cout << "  Global shift                        : "
+              << (global_cents >= 0 ? "+" : "") << global_cents
+              << " cents  (" << global_freq << " → " << target_freq << " Hz)\n\n";
 }
 
 // ---------------------------------------------------------------------------
