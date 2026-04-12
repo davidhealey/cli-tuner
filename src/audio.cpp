@@ -179,8 +179,8 @@ double detect_overall_pitch(const std::vector<float>& samples,
         return freqs;
     };
 
-    std::vector<float> freqs = collect(0.5f);
-    if (freqs.empty()) freqs = collect(0.25f); // relax threshold if nothing found
+    std::vector<float> freqs = collect(0.4f);
+    if (freqs.empty()) freqs = collect(0.2f); // relax if nothing found (e.g. breathy timbres)
 
     if (freqs.empty()) return 0.0;
 
@@ -217,7 +217,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
 
         float conf = 0.0f;
         float f = yin.detect(mono.data() + start, win, &conf);
-        if (f > 15.0f && f < 22000.0f && conf > 0.4f) {
+        if (f > 15.0f && f < 22000.0f && conf > 0.2f) {
             double freq  = static_cast<double>(f);
             double cents = std::abs(1200.0 * std::log2(freq / target_freq));
             if (cents <= 200.0)
