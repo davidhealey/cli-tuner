@@ -160,7 +160,8 @@ double detect_overall_pitch(const std::vector<float>& samples,
                             int       channels,
                             int       sample_rate,
                             double    target_freq,
-                            float     yin_threshold)
+                            float     yin_threshold,
+                            bool      warn_bimodal)
 {
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
@@ -225,6 +226,58 @@ double detect_overall_pitch(const std::vector<float>& samples,
     if (freqs.empty()) return 0.0;
 
     std::sort(freqs.begin(), freqs.end());
+
+    // --- Bimodality check ---
+    // If the sorted pitch estimates have a clear gap (> 15 cents) with enough
+    // samples on both sides, the recording likely contains two simultaneous pitch
+    // components (e.g. a vocal whistle where the voice and the whistle both register).
+    // Warn so the user can re-run with -f to target the correct component.
+    if (warn_bimodal && freqs.size() >= 6) {
+        const double kBimodalGapCents = 15.0;
+        const size_t kMinClusterSize  = 3;
+
+        double max_gap = 0.0;
+        size_t gap_pos = 0;
+        for (size_t i = 1; i < freqs.size(); ++i) {
+            double gap = 1200.0 * std::log2(static_cast<double>(freqs[i]) /
+                                             static_cast<double>(freqs[i-1]));
+            if (gap > max_gap) { max_gap = gap; gap_pos = i; }
+        }
+
+        size_t n_low  = gap_pos;
+        size_t n_high = freqs.size() - gap_pos;
+
+        if (max_gap >= kBimodalGapCents &&
+            n_low  >= kMinClusterSize   &&
+            n_high >= kMinClusterSize)
+        {
+            double low_hz  = static_cast<double>(freqs[(n_low  - 1) / 2]);
+            double high_hz = static_cast<double>(freqs[gap_pos + (n_high - 1) / 2]);
+            double low_c   = 1200.0 * std::log2(low_hz  / target_freq);
+            double high_c  = 1200.0 * std::log2(high_hz / target_freq);
+
+            // Overall median determines the dominant cluster
+            bool   dom_is_low = (freqs.size() / 2 < gap_pos);
+            double dom_hz  = dom_is_low ? low_hz  : high_hz;
+            double alt_hz  = dom_is_low ? high_hz : low_hz;
+            double dom_c   = dom_is_low ? low_c   : high_c;
+            double alt_c   = dom_is_low ? high_c  : low_c;
+            size_t dom_cnt = dom_is_low ? n_low   : n_high;
+            size_t alt_cnt = dom_is_low ? n_high  : n_low;
+
+            std::cerr << std::fixed << std::setprecision(1)
+                      << "Warning: two pitch components detected.\n"
+                      << "  Dominant  : " << dom_hz << " Hz  ("
+                      << (dom_c >= 0 ? "+" : "") << dom_c << "c)  ["
+                      << dom_cnt << " frames]\n"
+                      << "  Secondary : " << alt_hz << " Hz  ("
+                      << (alt_c >= 0 ? "+" : "") << alt_c << "c)  ["
+                      << alt_cnt << " frames]\n"
+                      << "  Using dominant. If the secondary is the target "
+                         "component, re-run with: -f " << alt_hz << "\n";
+        }
+    }
+
     return static_cast<double>(freqs[freqs.size() / 2]); // median
 }
 
@@ -238,7 +291,8 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     int    sample_rate,
     double target_freq,
     float  yin_threshold,
-    double* out_global_freq)
+    double* out_global_freq,
+    bool    warn_bimodal)
 {
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
@@ -256,7 +310,8 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     // We use this as the centre of the gate in Pass 2 instead of target_freq.
     // If global detection fails we fall back to target_freq.
     double global_freq = detect_overall_pitch(samples, channels, sample_rate,
-                                               target_freq, yin_threshold);
+                                               target_freq, yin_threshold,
+                                               warn_bimodal);
     if (global_freq <= 0.0) global_freq = target_freq;
     if (out_global_freq) *out_global_freq = global_freq;
 

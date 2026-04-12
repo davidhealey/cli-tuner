@@ -202,7 +202,7 @@ int main(int argc, char* argv[])
             prev_corr.push_back({ 0LL, ref_frames, out_fr, ratio });
         } else if (mode == "shift") {
             double det = detect_overall_pitch(ref_samples, ref_ch, ref_sr,
-                                              target_freq, yin_threshold);
+                                              target_freq, yin_threshold, false);
             if (det > 0.0) {
                 prev_global = det;
                 double ratio  = det / target_freq;
@@ -213,7 +213,7 @@ int main(int argc, char* argv[])
         } else { // drift
             prev_corr = compute_drift_corrections(
                 ref_samples, ref_ch, ref_sr, target_freq, yin_threshold,
-                &prev_global);
+                &prev_global, false);
         }
 
         std::cout << "--- Predicted output (mode: "
@@ -242,7 +242,7 @@ int main(int argc, char* argv[])
         std::vector<float> prev_out =
             apply_corrections(ref_samples, ref_ch, prev_corr);
         double out_pitch = detect_overall_pitch(prev_out, ref_ch, ref_sr,
-                                                target_freq, yin_threshold);
+                                                target_freq, yin_threshold, false);
         if (out_pitch > 0.0) {
             double out_cents = 1200.0 * std::log2(out_pitch / target_freq);
             std::cout << "  Output : " << out_pitch << " Hz  ("

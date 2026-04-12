@@ -45,11 +45,14 @@ bool save_audio(const std::string& path,
 // Detect the overall fundamental frequency of an audio recording.
 // Uses YIN on multiple windows and returns the median (robust against outliers).
 // Returns frequency in Hz, or 0 on failure.
+// If warn_bimodal is true (default) and two distinct pitch clusters are found,
+// a diagnostic warning is printed to stderr with a suggested -f value.
 double detect_overall_pitch(const std::vector<float>& samples,
                             int       channels,
                             int       sample_rate,
                             double    target_freq,
-                            float     yin_threshold);
+                            float     yin_threshold,
+                            bool      warn_bimodal = true);
 
 // Compute per-segment drift corrections to retune audio toward target_freq.
 // Analysis is done on the first channel of the interleaved buffer.
@@ -62,7 +65,8 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     int    sample_rate,
     double target_freq,
     float  yin_threshold,
-    double* out_global_freq = nullptr);
+    double* out_global_freq = nullptr,
+    bool    warn_bimodal    = true);
 
 // ---------------------------------------------------------------------------
 // Correction application
