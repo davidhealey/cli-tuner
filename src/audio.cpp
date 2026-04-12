@@ -170,10 +170,14 @@ double detect_overall_pitch(const std::vector<float>& samples,
     uint_t win = static_cast<uint_t>(analysis_window_for_rate(sample_rate));
     uint_t hop = win / 2;
 
-    // Skip the first and last 5% to avoid transient and release artefacts
-    long long skip = total_frames / 20;
+    // Skip the first 5% of frames to avoid attack transients, but run the
+    // detector from pos=0 so its internal autocorrelation buffer is fully
+    // populated before we start counting results.  The end-of-file tail skip
+    // is intentionally omitted: the median is robust to a handful of release
+    // detections, and for very short samples (staccatissimo < 0.5 s) the end
+    // skip would discard hops we can't afford to lose.
+    long long skip           = total_frames / 20;
     long long analysis_start = skip;
-    long long analysis_end   = total_frames - skip;
 
     // aubio_pitch_get_confidence() returns 0.0 for "yinfft" in many aubio builds,
     // so we use a cents gate (after octave snapping) as the quality filter.
@@ -195,14 +199,17 @@ double detect_overall_pitch(const std::vector<float>& samples,
         fvec_t* obuf = new_fvec(1);
 
         std::vector<float> freqs;
-        for (long long pos = analysis_start;
-             pos + static_cast<long long>(hop) <= analysis_end;
+        for (long long pos = 0;
+             pos + static_cast<long long>(hop) <= total_frames;
              pos += static_cast<long long>(hop))
         {
             for (uint_t i = 0; i < hop; ++i)
                 ibuf->data[i] = mono[static_cast<size_t>(pos + i)];
 
             aubio_pitch_do(pd, ibuf, obuf);
+
+            if (pos < analysis_start) continue; // attack warmup, discard
+
             float f = obuf->data[0];
 
             if (f > 15.f && f < 22000.f) {
