@@ -247,14 +247,25 @@ std::vector<SegmentCorrection> compute_drift_corrections(
 
     long long num_segs = (total_frames + seg - 1) / seg;
 
-    // --- Collect raw frequency estimates per segment via aubio yinfft ---
-    // Stream the whole file through aubio at hop = win/2.  Each correction
-    // segment receives ~2 estimates; we take the median of the valid ones.
-    // Try with the user-supplied tolerance first; if too few segments get any
-    // valid reading, retry with a more permissive tolerance (helps for breathy
-    // or noisy timbres where the YIN aperiodicity threshold is not met).
-    auto run_pass = [&](float tol, double gate_cents,
-                        std::vector<std::vector<double>>& out)
+    // --- Pass 1: robust global pitch estimate ---
+    // detect_overall_pitch() skips the first/last 5% of the file and returns
+    // the median of all accepted detections.  This is resistant to attack /
+    // release transients, which are the main source of false readings.
+    // We use this as the centre of the gate in Pass 2 instead of target_freq.
+    // If global detection fails we fall back to target_freq.
+    double global_freq = detect_overall_pitch(samples, channels, sample_rate,
+                                               target_freq, yin_threshold);
+    if (global_freq <= 0.0) global_freq = target_freq;
+
+    // --- Pass 2: per-segment detection, gate centred on global_freq ---
+    // Using global_freq as the gate centre prevents attack/release artefacts
+    // from being accepted: they are typically farther from the stable sustained
+    // pitch than from the target note.
+    // 150 cents ≈ 1.5 semitones — enough for real intonation drift, but tight
+    // enough to reject transient detections that would cause a pitch ramp.
+    const double kGateCents = 150.0;
+
+    auto run_pass = [&](float tol, std::vector<std::vector<double>>& out)
     {
         aubio_pitch_t* pd = new_aubio_pitch("yinfft", win, hop,
                                              static_cast<uint_t>(sample_rate));
@@ -277,8 +288,8 @@ std::vector<SegmentCorrection> compute_drift_corrections(
 
             if (f > 15.f && f < 22000.f) {
                 double snapped = snap_to_octave(static_cast<double>(f), target_freq);
-                double cents   = std::abs(1200.0 * std::log2(snapped / target_freq));
-                if (cents <= gate_cents) {
+                double cents   = std::abs(1200.0 * std::log2(snapped / global_freq));
+                if (cents <= kGateCents) {
                     long long seg_idx = pos / seg;
                     if (seg_idx < num_segs)
                         out[static_cast<size_t>(seg_idx)].push_back(snapped);
@@ -292,19 +303,19 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     };
 
     std::vector<std::vector<double>> seg_freqs(static_cast<size_t>(num_segs));
-    run_pass(yin_threshold, 200.0, seg_freqs);
-
-    // Count how many segments have at least one valid estimate.
-    long long covered = 0;
-    for (const auto& v : seg_freqs) if (!v.empty()) ++covered;
+    run_pass(yin_threshold, seg_freqs);
 
     // If fewer than half the segments have data, retry with relaxed tolerance.
-    if (covered < num_segs / 2) {
-        seg_freqs.assign(static_cast<size_t>(num_segs), {});
-        run_pass(std::min(yin_threshold * 2.0f, 0.5f), 200.0, seg_freqs);
+    {
+        long long covered = 0;
+        for (const auto& v : seg_freqs) if (!v.empty()) ++covered;
+        if (covered < num_segs / 2) {
+            seg_freqs.assign(static_cast<size_t>(num_segs), {});
+            run_pass(std::min(yin_threshold * 2.0f, 0.5f), seg_freqs);
+        }
     }
 
-    // Reduce each segment's estimates to a single median value.
+    // Reduce each segment to a single median value.
     std::vector<double> raw(static_cast<size_t>(num_segs), 0.0);
     for (long long s = 0; s < num_segs; ++s) {
         auto& v = seg_freqs[static_cast<size_t>(s)];
@@ -314,42 +325,22 @@ std::vector<SegmentCorrection> compute_drift_corrections(
         }
     }
 
-    // --- Interpolate missing estimates ---
-    {
-        int first_valid = -1, last_valid = -1;
-        for (int s = 0; s < static_cast<int>(num_segs); ++s) {
-            if (raw[static_cast<size_t>(s)] > 0.0) {
-                if (first_valid < 0) first_valid = s;
-                last_valid = s;
-            }
-        }
-        if (first_valid < 0) {
-            std::cerr << "Error: no valid pitch detected for drift correction\n";
-            return {};
-        }
-
-        // Extend edges
-        for (int s = 0; s < first_valid; ++s)
-            raw[static_cast<size_t>(s)] = raw[static_cast<size_t>(first_valid)];
-        for (int s = last_valid + 1; s < static_cast<int>(num_segs); ++s)
-            raw[static_cast<size_t>(s)] = raw[static_cast<size_t>(last_valid)];
-
-        // Linear interpolation between valid points
-        int prev = first_valid;
-        for (int s = first_valid + 1; s <= last_valid; ++s) {
-            if (raw[static_cast<size_t>(s)] > 0.0) {
-                if (s - prev > 1) {
-                    for (int k = prev + 1; k < s; ++k) {
-                        double t = static_cast<double>(k - prev) / (s - prev);
-                        raw[static_cast<size_t>(k)] =
-                            raw[static_cast<size_t>(prev)] * (1.0 - t) +
-                            raw[static_cast<size_t>(s)]    * t;
-                    }
-                }
-                prev = s;
-            }
-        }
+    // --- Fill missing segments with global_freq ---
+    // Segments with no valid local estimate (attack, release, heavily breathy
+    // sections) receive the global detected pitch.  This gives those segments a
+    // neutral correction equal to the overall shift, rather than a spurious
+    // per-segment drift based on interpolated neighbours.
+    bool any_valid = false;
+    for (long long s = 0; s < num_segs; ++s) {
+        if (raw[static_cast<size_t>(s)] > 0.0) { any_valid = true; break; }
     }
+    if (!any_valid) {
+        std::cerr << "Error: no valid pitch detected for drift correction\n";
+        return {};
+    }
+    for (long long s = 0; s < num_segs; ++s)
+        if (raw[static_cast<size_t>(s)] <= 0.0)
+            raw[static_cast<size_t>(s)] = global_freq;
 
     // --- Smooth with a 7-point moving average ---
     // At 48 kHz the window spans ~742 ms, covering ~4 vibrato cycles at 6 Hz,
@@ -365,7 +356,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
             double v = raw[static_cast<size_t>(k)];
             if (v > 0.0) { sum += v; ++cnt; }
         }
-        smooth[static_cast<size_t>(s)] = (cnt > 0) ? (sum / cnt) : target_freq;
+        smooth[static_cast<size_t>(s)] = (cnt > 0) ? (sum / cnt) : global_freq;
     }
 
     // --- Build SegmentCorrection list ---
@@ -377,7 +368,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
         long long len   = std::min(static_cast<long long>(seg), total_frames - start);
 
         double detected = smooth[static_cast<size_t>(s)];
-        if (detected < 1.0) detected = target_freq; // safety
+        if (detected < 1.0) detected = global_freq; // safety
 
         double ratio = detected / target_freq;
         // Clamp to ±6 semitones (factor ~0.707–1.414) to avoid extreme artefacts
