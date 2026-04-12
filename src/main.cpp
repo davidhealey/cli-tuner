@@ -25,7 +25,7 @@ static void print_usage(const char* prog)
         << "  -a          Analyse the first input file and print per-segment pitch\n"
         << "              detection details.  No output files are written.\n"
         << "              Useful for diagnosing detection quality.\n"
-        << "  -F <hz>     Force the source pitch to this frequency (Hz) instead of\n"
+        << "  -f <hz>     Force the source pitch to this frequency (Hz) instead of\n"
         << "              auto-detecting it.  Use when the detector finds the wrong\n"
         << "              component in a multi-pitch recording (e.g. vocal+instrument).\n"
         << "              Bypasses automatic detection; applies a uniform shift only.\n"
@@ -45,7 +45,7 @@ static void print_usage(const char* prog)
         << "  " << prog << " -n 60 -o tuned/ sample.wav\n"
         << "  " << prog << " -n 60 -m drift -o tuned/ close.wav room.wav\n"
         << "  " << prog << " -n 60 -a sample.wav\n"
-        << "  " << prog << " -n 80 -F 820 -o tuned/ vocal_whistle.wav\n";
+        << "  " << prog << " -n 80 -f 820 -o tuned/ vocal_whistle.wav\n";
 }
 
 static double midi_to_freq(int note)
@@ -69,7 +69,7 @@ int main(int argc, char* argv[])
     bool        analyze_mode       = false;
 
     int opt;
-    while ((opt = getopt(argc, argv, "n:o:m:t:c:F:ah")) != -1) {
+    while ((opt = getopt(argc, argv, "n:o:m:t:c:f:ah")) != -1) {
         switch (opt) {
             case 'n':
                 try { midi_note = std::stoi(optarg); }
@@ -94,7 +94,7 @@ int main(int argc, char* argv[])
                     return 1;
                 }
                 break;
-            case 'F':
+            case 'f':
                 try { forced_src_freq = std::stod(optarg); }
                 catch (...) {
                     std::cerr << "Error: invalid frequency '" << optarg << "'\n";
@@ -129,7 +129,7 @@ int main(int argc, char* argv[])
         return 1;
     }
     if (forced_src_freq != 0.0 && (forced_src_freq < 20.0 || forced_src_freq > 20000.0)) {
-        std::cerr << "Error: -F frequency must be in the range 20–20000 Hz\n";
+        std::cerr << "Error: -f frequency must be in the range 20–20000 Hz\n";
         return 1;
     }
 
