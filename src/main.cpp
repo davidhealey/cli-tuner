@@ -162,12 +162,69 @@ int main(int argc, char* argv[])
               << " ch, " << static_cast<double>(ref_frames) / ref_sr
               << " s\n";
 
-    // --- Analyze mode: print diagnostics and exit ---
+    // --- Analyze mode: print diagnostics then show predicted output pitch ---
     if (analyze_mode) {
         std::cout << "  Target : MIDI " << midi_note
                   << "  (" << target_freq << " Hz)\n"
                   << "  YIN threshold : " << yin_threshold << "\n";
         analyze_audio(ref_samples, ref_ch, ref_sr, target_freq, yin_threshold);
+
+        // Compute the corrections that would actually be applied, apply them
+        // to an in-memory copy, then re-detect pitch so the user can verify
+        // the output with a tuner without needing a second run.
+        std::vector<SegmentCorrection> prev_corr;
+        double prev_global = 0.0;
+
+        if (mode == "shift") {
+            double det = detect_overall_pitch(ref_samples, ref_ch, ref_sr,
+                                              target_freq, yin_threshold);
+            if (det > 0.0) {
+                prev_global = det;
+                double ratio  = det / target_freq;
+                long long out_fr = std::llround(
+                    static_cast<double>(ref_frames) * ratio);
+                prev_corr.push_back({ 0LL, ref_frames, out_fr, ratio });
+            }
+        } else { // drift
+            prev_corr = compute_drift_corrections(
+                ref_samples, ref_ch, ref_sr, target_freq, yin_threshold,
+                &prev_global);
+        }
+
+        std::cout << "--- Predicted output (mode: " << mode << ") ---\n";
+
+        if (prev_global <= 0.0 || prev_corr.empty()) {
+            std::cout << "  Detection failed – cannot predict output pitch.\n\n";
+            return 0;
+        }
+
+        double prev_cents    = 1200.0 * std::log2(prev_global / target_freq);
+        double prev_deviation = std::abs(prev_cents);
+
+        std::cout << "  Input  : " << prev_global << " Hz  ("
+                  << (prev_cents >= 0 ? "+" : "") << prev_cents << " cents)\n";
+
+        if (min_correction_cents > 0.0 && prev_deviation < min_correction_cents) {
+            std::cout << "  Action : copy unchanged  (deviation "
+                      << prev_deviation << "c < "
+                      << min_correction_cents << "c threshold)\n";
+            std::cout << "  Output : " << prev_global << " Hz  (unchanged)\n\n";
+            return 0;
+        }
+
+        std::cout << "  Action : correct\n";
+        std::vector<float> prev_out =
+            apply_corrections(ref_samples, ref_ch, prev_corr);
+        double out_pitch = detect_overall_pitch(prev_out, ref_ch, ref_sr,
+                                                target_freq, yin_threshold);
+        if (out_pitch > 0.0) {
+            double out_cents = 1200.0 * std::log2(out_pitch / target_freq);
+            std::cout << "  Output : " << out_pitch << " Hz  ("
+                      << (out_cents >= 0 ? "+" : "") << out_cents
+                      << " cents)\n\n";
+        } else {
+            std::cout << "  Output : pitch detection failed on corrected audio\n\n";
+        }
         return 0;
     }
 
