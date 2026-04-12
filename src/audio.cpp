@@ -522,6 +522,8 @@ void analyze_audio(const std::vector<float>& samples,
               << (used_fallback ? std::min(yin_threshold * 2.0f, 0.5f) : yin_threshold)
               << ")\n\n";
 
+    // "shift"      – no measurable drift; global correction applied uniformly
+    // "shift+drift" – segment deviates enough from global to warrant extra fine-tuning
     std::cout << "  Seg  Time      Raw Hz    Smooth Hz  ΔGlobal    ΔTarget    Action\n";
     std::cout << "  ---  --------  --------  ---------  ---------  ---------  ------\n";
 
@@ -537,12 +539,12 @@ void analyze_audio(const std::vector<float>& samples,
 
         const char* action;
         if (std::abs(dev_global) >= kMinDriftCents) {
-            action = "per-seg";
+            action = "shift+drift";
             ++n_corrected;
             min_smooth = std::min(min_smooth, smooth_val);
             max_smooth = std::max(max_smooth, smooth_val);
         } else {
-            action = "global";
+            action = "shift";
         }
 
         // Only print every segment (they may be many; truncate for very long files)
@@ -570,13 +572,23 @@ void analyze_audio(const std::vector<float>& samples,
     double applied_drift = (n_corrected > 1)
         ? 1200.0 * std::log2(max_smooth / min_smooth) : 0.0;
 
-    std::cout << "\n  Segments with per-segment correction : "
-              << n_corrected << " / " << num_segs << "\n";
-    std::cout << "  Applied drift range                 : "
-              << applied_drift << " cents peak-to-peak\n";
-    std::cout << "  Global shift                        : "
+    double global_ratio = (global_freq > 0.0) ? global_freq / target_freq : 1.0;
+
+    std::cout << "\n--- Summary ---\n";
+    std::cout << "  Global correction   : "
               << (global_cents >= 0 ? "+" : "") << global_cents
-              << " cents  (" << global_freq << " → " << target_freq << " Hz)\n\n";
+              << " cents  (ratio " << std::fixed << std::setprecision(5) << global_ratio << ")"
+              << "  →  will be applied to ALL " << num_segs << " segments\n";
+    std::cout << "  Per-segment drift   : " << std::setprecision(1)
+              << applied_drift << " cents peak-to-peak"
+              << "  (" << n_corrected << " / " << num_segs
+              << " segments have additional drift correction)\n";
+    if (n_corrected == 0 && std::abs(global_cents) > 0.01) {
+        std::cout << "  Note: no pitch drift detected — the "
+                  << (global_cents >= 0 ? "+" : "") << global_cents
+                  << "-cent global correction WILL be applied uniformly to all segments.\n";
+    }
+    std::cout << "\n";
 }
 
 // ---------------------------------------------------------------------------

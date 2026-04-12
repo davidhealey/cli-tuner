@@ -208,15 +208,19 @@ int main(int argc, char* argv[])
             return 1;
         }
 
-        // Print a brief summary of drift range
+        // Print a brief summary of global shift + drift range
         double min_r = corrections[0].src_ratio;
         double max_r = corrections[0].src_ratio;
         for (const auto& c : corrections) {
             min_r = std::min(min_r, c.src_ratio);
             max_r = std::max(max_r, c.src_ratio);
         }
+        double global_shift_cents = 1200.0 * std::log2(detected_global / target_freq);
         double drift_cents = 1200.0 * std::log2(max_r / min_r);
-        std::cout << "  Segments : " << corrections.size() << "\n";
+        std::cout << "  Detected : " << detected_global << " Hz\n";
+        std::cout << "  Shift    : " << (global_shift_cents >= 0 ? "+" : "")
+                  << global_shift_cents << " cents  (applied to all "
+                  << corrections.size() << " segments)\n";
         std::cout << "  Drift    : " << drift_cents << " cents peak-to-peak\n";
     }
 
