@@ -237,7 +237,8 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     int    channels,
     int    sample_rate,
     double target_freq,
-    float  yin_threshold)
+    float  yin_threshold,
+    double* out_global_freq)
 {
     long long total_frames = static_cast<long long>(samples.size()) / channels;
     std::vector<float> mono = to_mono(samples, channels, total_frames);
@@ -257,6 +258,7 @@ std::vector<SegmentCorrection> compute_drift_corrections(
     double global_freq = detect_overall_pitch(samples, channels, sample_rate,
                                                target_freq, yin_threshold);
     if (global_freq <= 0.0) global_freq = target_freq;
+    if (out_global_freq) *out_global_freq = global_freq;
 
     // --- Pass 2: per-segment detection, gate centred on global_freq ---
     // Using global_freq as the gate centre prevents attack/release artefacts

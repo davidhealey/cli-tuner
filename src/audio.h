@@ -54,12 +54,15 @@ double detect_overall_pitch(const std::vector<float>& samples,
 // Compute per-segment drift corrections to retune audio toward target_freq.
 // Analysis is done on the first channel of the interleaved buffer.
 // Returns a list of SegmentCorrection structs that cover the entire file.
+// out_global_freq (optional): receives the Pass-1 global detected frequency so
+// the caller can decide whether the correction is worth applying.
 std::vector<SegmentCorrection> compute_drift_corrections(
     const std::vector<float>& samples,
     int    channels,
     int    sample_rate,
     double target_freq,
-    float  yin_threshold);
+    float  yin_threshold,
+    double* out_global_freq = nullptr);
 
 // ---------------------------------------------------------------------------
 // Correction application

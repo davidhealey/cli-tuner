@@ -159,8 +159,14 @@ int main(int argc, char* argv[])
         return 0;
     }
 
+    // Below this threshold the detected deviation is within the pitch-detection
+    // noise floor; applying the correction risks making the output less accurate
+    // than the original.  Files within this range are passed through unchanged.
+    static constexpr double kMinCorrectionCents = 15.0;
+
     // --- Compute corrections from the reference file ---
     std::vector<SegmentCorrection> corrections;
+    double detected_global = 0.0; // filled by both branches
 
     if (mode == "shift") {
         double detected = detect_overall_pitch(ref_samples, ref_ch, ref_sr, target_freq, yin_threshold);
@@ -169,6 +175,7 @@ int main(int argc, char* argv[])
                       << input_files[0] << "'\n";
             return 1;
         }
+        detected_global = detected;
         double semitones = freq_to_semitones(detected, target_freq);
         std::cout << "  Detected : " << detected << " Hz\n";
         std::cout << "  Target   : " << target_freq << " Hz\n";
@@ -182,7 +189,8 @@ int main(int argc, char* argv[])
 
     } else { // drift
         corrections = compute_drift_corrections(
-            ref_samples, ref_ch, ref_sr, target_freq, yin_threshold);
+            ref_samples, ref_ch, ref_sr, target_freq, yin_threshold,
+            &detected_global);
         if (corrections.empty()) {
             std::cerr << "Error: drift analysis failed for '"
                       << input_files[0] << "'\n";
@@ -199,6 +207,18 @@ int main(int argc, char* argv[])
         double drift_cents = 1200.0 * std::log2(max_r / min_r);
         std::cout << "  Segments : " << corrections.size() << "\n";
         std::cout << "  Drift    : " << drift_cents << " cents peak-to-peak\n";
+    }
+
+    // --- Guard: skip correction if the detected deviation is too small ---
+    // If the overall pitch is already within kMinCorrectionCents of target,
+    // the detection uncertainty is comparable to the deviation itself and
+    // correcting could make the output worse than the input.
+    double global_cents = std::abs(1200.0 * std::log2(detected_global / target_freq));
+    if (global_cents < kMinCorrectionCents) {
+        std::cout << "  Within " << kMinCorrectionCents
+                  << "-cent threshold (" << global_cents
+                  << " cents) – already in tune, skipping correction.\n\n";
+        return 0;
     }
 
     std::cout << "\n";
